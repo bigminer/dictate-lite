@@ -24,3 +24,11 @@ COMPUTE_TYPE = 'float16'
 
 # Audio device index: None = system default, or specify device number
 AUDIO_DEVICE = None
+
+# Noise reduction: True to filter background noise before transcription
+# Helps with fans, AC, ambient noise - uses noisereduce library
+NOISE_REDUCTION = False
+
+# Copy transcribed text to clipboard in addition to typing it
+# Useful as backup if text injection fails in some applications
+USE_CLIPBOARD = True

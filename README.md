@@ -41,7 +41,7 @@ winget install Python.Python.3.13
 
 ### 2. NVIDIA GPU + CUDA (Optional, but recommended)
 
-For fast transcription (~1-2 seconds), you need an NVIDIA GPU with CUDA support.
+For fast transcription, you need an NVIDIA GPU with CUDA support. Typical transcription times vary by audio length and hardware (GPU: ~1-3 seconds for short phrases, CPU: ~5-15 seconds).
 
 **Check if you have an NVIDIA GPU:**
 1. Press `Win+X` → Device Manager
@@ -54,7 +54,7 @@ For fast transcription (~1-2 seconds), you need an NVIDIA GPU with CUDA support.
 3. Download and install (use Express installation)
 4. Restart your computer
 
-**No NVIDIA GPU?** The tool will automatically use CPU mode. It's slower (~5-10 seconds) but works fine.
+**No NVIDIA GPU?** The tool will automatically use CPU mode. It's slower but works fine.
 
 ## Installation
 
@@ -94,6 +94,32 @@ The installer is idempotent - safe to run multiple times to reconfigure.
 3. **Check status:** Hover over tray icon for current settings
 
 4. **Exit:** Right-click tray icon → Exit
+
+## Limitations
+
+This tool is optimized for single-speaker dictation in reasonably quiet environments. Transcription accuracy may degrade in the following scenarios:
+
+- **Background conversations** - Multiple voices speaking simultaneously
+- **Noisy environments** - Loud ambient noise, machinery, or music
+- **Distant microphone placement** - Speaking far from the microphone
+
+For best results, use a close-range microphone and minimize background noise. If you experience issues with ambient noise, enable noise reduction in `config.py`:
+
+```python
+NOISE_REDUCTION = True
+```
+
+This applies audio filtering before transcription, which can help with stationary noise (fans, AC, traffic hum) but may not fully isolate your voice from other speakers.
+
+### Text Injection Behavior
+
+Transcribed text is injected into the active window using simulated keystrokes with a 10ms delay between characters. This deliberate throttling prevents crashes in certain terminal applications (notably Claude Code's TUI). The text is also copied to the clipboard by default as a backup.
+
+If clipboard copying interferes with your workflow, disable it in `config.py`:
+
+```python
+USE_CLIPBOARD = False
+```
 
 ## Uninstalling
 
@@ -150,18 +176,33 @@ LANGUAGE = 'en'           # 'en', 'auto', 'es', 'fr', 'de', 'ja', etc.
 DEVICE = 'cuda'           # 'cuda' or 'cpu'
 COMPUTE_TYPE = 'float16'  # 'float16' for GPU, 'int8' for CPU
 AUDIO_DEVICE = None       # None = default, or device index
+NOISE_REDUCTION = False   # True to filter background noise
+USE_CLIPBOARD = True      # Copy text to clipboard as backup
 ```
 
 ## Files
 
 | File | Purpose |
 |------|---------|
+| `dictate.py` | Main application - system tray, hotkey, transcription |
+| `speak.py` | Text-to-speech utility (see below) |
 | `install.bat` | Setup wizard (safe to re-run) |
 | `uninstall.bat` | Remove installation |
 | `start-dictation.bat` | Launch the tool |
+| `launch.cmd` | Headless launcher with logging |
 | `test-install.bat` | Verify installation |
 | `config.py` | Your settings (generated) |
 | `config.example.py` | Configuration template |
+
+### speak.py - Text-to-Speech Utility
+
+A standalone utility for text-to-speech using Microsoft Edge's neural voices:
+
+```
+.venv\Scripts\python speak.py "Hello, this is a test."
+```
+
+This is a separate tool from the main dictation functionality and is included for convenience.
 
 ## License
 
@@ -174,7 +215,8 @@ This project is built on excellent open source software:
 - **[OpenAI Whisper](https://github.com/openai/whisper)** - Speech recognition model (MIT)
 - **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** - Optimized Whisper implementation (MIT)
 - **[pystray](https://github.com/moses-palmer/pystray)** - System tray integration (LGPLv3)
-- **[Pillow](https://python-pillow.org/)** - Image processing (HPND)
+- **[Pillow](https://python-pillow.org/)** - Icon generation (HPND)
 - **[keyboard](https://github.com/boppreh/keyboard)** - Global hotkeys (MIT)
 - **[sounddevice](https://python-sounddevice.readthedocs.io/)** - Audio capture (MIT)
+- **[noisereduce](https://github.com/timsainb/noisereduce)** - Audio noise reduction (MIT)
 - **[edge-tts](https://github.com/rany2/edge-tts)** - Text-to-speech (MIT)

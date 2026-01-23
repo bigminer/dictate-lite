@@ -14,6 +14,7 @@ Windows voice dictation utility using GPU-accelerated Whisper transcription. Hol
 - **sounddevice/soundfile** - Audio streaming and I/O
 - **numpy** - Audio array processing
 - **pyperclip** - Clipboard operations for text injection
+- **noisereduce** - Optional background noise filtering
 - **pystray/Pillow** - System tray icon
 - **edge-tts** - Microsoft neural TTS for speak.py
 
@@ -70,6 +71,8 @@ LANGUAGE = 'en'           # 'en', 'auto', 'es', 'fr', 'de', etc.
 DEVICE = 'cuda'           # 'cuda' for GPU, 'cpu' for CPU-only
 COMPUTE_TYPE = 'float16'  # 'float16' for GPU, 'int8' for CPU
 AUDIO_DEVICE = None       # None = system default, or device index
+NOISE_REDUCTION = False   # True to filter background noise before transcription
+USE_CLIPBOARD = True      # Copy text to clipboard as backup
 ```
 
 ## Model Cache

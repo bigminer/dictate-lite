@@ -7,3 +7,4 @@ pyperclip
 edge-tts
 pystray
 Pillow
+noisereduce

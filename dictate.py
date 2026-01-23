@@ -79,6 +79,14 @@ except Exception as e:
     logger.warning(f"pystray not available, will use console mode: {e}")
     TRAY_AVAILABLE = False
 
+try:
+    import noisereduce as nr
+    logger.info("noisereduce imported OK")
+    NOISEREDUCE_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"noisereduce not available: {e}")
+    NOISEREDUCE_AVAILABLE = False
+
 # Single instance lock file
 LOCK_FILE = os.path.join(tempfile.gettempdir(), 'voice-dictation.lock')
 
@@ -234,6 +242,27 @@ except ImportError:
     AUDIO_DEVICE = None
     LANGUAGE = 'en'
 
+# Optional config: noise reduction (default off)
+try:
+    from config import NOISE_REDUCTION
+except ImportError:
+    NOISE_REDUCTION = False
+
+if NOISE_REDUCTION and not NOISEREDUCE_AVAILABLE:
+    logger.warning("NOISE_REDUCTION enabled but noisereduce not installed. Disabling.")
+    NOISE_REDUCTION = False
+elif NOISE_REDUCTION:
+    logger.info("Noise reduction enabled")
+
+# Optional config: clipboard copy (default on)
+try:
+    from config import USE_CLIPBOARD
+except ImportError:
+    USE_CLIPBOARD = True
+
+if USE_CLIPBOARD:
+    logger.info("Clipboard copy enabled")
+
 # Handle 'auto' language setting
 TRANSCRIBE_LANGUAGE = None if LANGUAGE == 'auto' else LANGUAGE
 
@@ -295,6 +324,14 @@ def stop_recording_and_transcribe():
     # Combine recorded audio
     audio_data = np.concatenate(recorded_frames, axis=0)
 
+    # Apply noise reduction if enabled
+    if NOISE_REDUCTION:
+        logger.debug("Applying noise reduction...")
+        # Flatten to 1D for noisereduce, then reshape back
+        audio_flat = audio_data.flatten()
+        audio_flat = nr.reduce_noise(y=audio_flat, sr=SAMPLE_RATE)
+        audio_data = audio_flat.reshape(-1, 1)
+
     # Save to temp file (faster-whisper needs a file)
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
         temp_path = f.name
@@ -312,8 +349,9 @@ def stop_recording_and_transcribe():
         if text:
             logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
 
-            # Copy to clipboard
-            pyperclip.copy(text)
+            # Copy to clipboard if enabled
+            if USE_CLIPBOARD:
+                pyperclip.copy(text)
 
             # Type the text into active window
             # Small delay to ensure window focus
@@ -421,10 +459,12 @@ def main():
         with stream:
             if TRAY_AVAILABLE:
                 # Create system tray icon
+                noise_status = 'On' if NOISE_REDUCTION else 'Off'
                 menu = pystray.Menu(
                     pystray.MenuItem(f'Hotkey: {HOTKEY.upper()}', lambda: None, enabled=False),
                     pystray.MenuItem(f'Model: {MODEL_SIZE}', lambda: None, enabled=False),
                     pystray.MenuItem(f'Language: {LANGUAGE}', lambda: None, enabled=False),
+                    pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem('Exit', on_tray_exit)
                 )

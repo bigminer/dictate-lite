@@ -245,6 +245,13 @@ echo Writing configuration...
     echo.
     echo # Audio device index: None = system default
     echo AUDIO_DEVICE = None
+    echo.
+    echo # Noise reduction: True to filter background noise
+    echo # Helps with fans, AC, ambient noise
+    echo NOISE_REDUCTION = False
+    echo.
+    echo # Copy transcribed text to clipboard in addition to typing
+    echo USE_CLIPBOARD = True
 ) > config.py
 
 :install_complete
