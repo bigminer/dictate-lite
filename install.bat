@@ -132,10 +132,13 @@ echo ============================================
 echo  [6/6] Configuration
 echo ============================================
 
-:: Check for existing config
+:: Check for existing config and capture current model
+set "OLD_MODEL_SIZE="
 if exist src\config.py (
+    for /f "tokens=3 delims='" %%m in ('findstr /c:"MODEL_SIZE = " src\config.py 2^>nul') do set "OLD_MODEL_SIZE=%%m"
     echo.
     echo  Existing configuration found.
+    if not "!OLD_MODEL_SIZE!"=="" echo  Current model: !OLD_MODEL_SIZE!
     set /p "RECONFIG=Reconfigure settings? [y/N]: "
     if /i not "!RECONFIG!"=="y" (
         echo  Keeping existing configuration.
@@ -254,7 +257,87 @@ echo Writing configuration...
     echo USE_CLIPBOARD = True
 ) > src\config.py
 
+:: Check if model changed and needs download
+set "MODEL_CHANGED=0"
+if not "!OLD_MODEL_SIZE!"=="" (
+    if not "!OLD_MODEL_SIZE!"=="!MODEL_SIZE!" (
+        set "MODEL_CHANGED=1"
+    )
+)
+
+:: If model changed or new install, offer to download now
+if "!MODEL_CHANGED!"=="1" (
+    echo.
+    echo  Model changed from !OLD_MODEL_SIZE! to !MODEL_SIZE!.
+    echo  Downloading new model now...
+    goto :download_model
+)
+
+:: For new installs without existing config
+if "!OLD_MODEL_SIZE!"=="" (
+    echo.
+    echo  Downloading !MODEL_SIZE! model now...
+    goto :download_model
+)
+
+goto :install_complete
+
+:download_model
+echo.
+echo ============================================
+echo  Downloading Whisper Model: !MODEL_SIZE!
+echo ============================================
+echo.
+echo  This may take a while depending on model size:
+echo    tiny ~75MB, base ~150MB, small ~500MB,
+echo    medium ~1.5GB, large ~3GB
+echo.
+
+:: Suppress HuggingFace warnings and download the model
+set "HF_HUB_DISABLE_SYMLINKS_WARNING=1"
+set "HF_HUB_DISABLE_PROGRESS_BARS=0"
+echo  Downloading... this may take several minutes for larger models.
+echo  Please wait, do not close this window.
+echo.
+python -W ignore -c "import warnings; warnings.filterwarnings('ignore'); from faster_whisper import WhisperModel; print('  Loading model...'); m = WhisperModel('!MODEL_SIZE!', device='!DEVICE!', compute_type='!COMPUTE_TYPE!'); print('  Done!')"
+if errorlevel 1 (
+    echo.
+    echo  WARNING: Model download may have failed.
+    echo  The model will be downloaded on first run instead.
+    echo.
+) else (
+    echo.
+    echo  Model !MODEL_SIZE! downloaded and verified!
+)
+
 :install_complete
+
+:: Generate application icon if it doesn't exist
+if not exist voice-dictation.ico (
+    echo.
+    echo  Generating application icon...
+    python src\create_icon.py >nul 2>&1
+    if exist voice-dictation.ico (
+        echo  OK: Icon created
+    ) else (
+        echo  Note: Icon generation skipped
+    )
+)
+
+:: Offer to create desktop shortcut if it doesn't exist
+if not exist "%USERPROFILE%\Desktop\Voice Dictation.lnk" (
+    echo.
+    set /p "CREATE_SHORTCUT=Create desktop shortcut? [Y/n]: "
+    if /i not "!CREATE_SHORTCUT!"=="n" (
+        echo  Creating shortcut...
+        powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $shortcut = $ws.CreateShortcut([Environment]::GetFolderPath('Desktop') + '\Voice Dictation.lnk'); $shortcut.TargetPath = '%~dp0start-dictation.bat'; $shortcut.WorkingDirectory = '%~dp0'; $shortcut.IconLocation = '%~dp0voice-dictation.ico,0'; $shortcut.Description = 'Voice Dictation - Hold hotkey to record, release to transcribe'; $shortcut.Save()"
+        if exist "%USERPROFILE%\Desktop\Voice Dictation.lnk" (
+            echo  OK: Shortcut created on Desktop
+        ) else (
+            echo  Note: Could not create shortcut
+        )
+    )
+)
 echo.
 echo ============================================
 echo  Installation Complete!
@@ -266,17 +349,22 @@ echo    Model:    !MODEL_SIZE!
 echo    Language: !LANGUAGE!
 echo    Device:   !DEVICE!
 echo.
-echo  IMPORTANT - First Run:
-echo    The first time you run the tool, it will download the
-echo    Whisper speech model. This requires internet access.
-echo    Model sizes: tiny ~75MB, base ~150MB, small ~500MB,
-echo                 medium ~1.5GB, large ~3GB
-echo.
-echo  Next steps:
-echo    1. Run test-install.bat to verify everything works
-echo    2. Run start-dictation.bat to use the tool
-echo.
 echo  To reconfigure later, run install.bat again.
 echo  To uninstall, run uninstall.bat
 echo.
-pause
+
+:: Prompt to start the application
+set /p "START_NOW=Start Voice Dictation now? [Y/n]: "
+if /i "!START_NOW!"=="n" (
+    echo.
+    echo  To start later, run: start-dictation.bat
+    echo.
+    timeout /t 3 >nul
+    exit /b 0
+)
+
+:: Start the application
+echo.
+echo  Starting Voice Dictation...
+start "" cmd /c start-dictation.bat
+exit /b 0
