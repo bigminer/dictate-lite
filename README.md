@@ -162,3 +162,19 @@ AUDIO_DEVICE = None       # None = default, or device index
 | `test-install.bat` | Verify installation |
 | `config.py` | Your settings (generated) |
 | `config.example.py` | Configuration template |
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+## Acknowledgments
+
+This project is built on excellent open source software:
+
+- **[OpenAI Whisper](https://github.com/openai/whisper)** - Speech recognition model (MIT)
+- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** - Optimized Whisper implementation (MIT)
+- **[pystray](https://github.com/moses-palmer/pystray)** - System tray integration (LGPLv3)
+- **[Pillow](https://python-pillow.org/)** - Image processing (HPND)
+- **[keyboard](https://github.com/boppreh/keyboard)** - Global hotkeys (MIT)
+- **[sounddevice](https://python-sounddevice.readthedocs.io/)** - Audio capture (MIT)
+- **[edge-tts](https://github.com/rany2/edge-tts)** - Text-to-speech (MIT)
