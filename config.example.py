@@ -7,8 +7,14 @@
 HOTKEY = 'alt+f'
 
 # Whisper model size: tiny, base, small, medium, large
-# Larger = more accurate but slower
+# Larger = more accurate but slower and uses more VRAM
+# tiny (~1s), base (~2s), small (~3s), medium (~5s), large (~10s)
 MODEL_SIZE = 'small'
+
+# Language for transcription
+# 'en' = English, 'auto' = auto-detect, or specific code: 'es', 'fr', 'de', 'ja', etc.
+# Full list: https://github.com/openai/whisper#available-models-and-languages
+LANGUAGE = 'en'
 
 # Device: 'cuda' for GPU, 'cpu' for CPU-only
 DEVICE = 'cuda'

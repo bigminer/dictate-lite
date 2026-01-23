@@ -9,7 +9,7 @@ echo ============================================
 echo.
 
 :: Check for Python
-echo [1/5] Checking for Python...
+echo [1/6] Checking for Python...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo.
@@ -51,9 +51,18 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/5] Creating virtual environment...
+echo [2/6] Setting up virtual environment...
 if exist .venv (
-    echo       .venv already exists, skipping creation
+    echo       .venv already exists
+    set /p "RECREATE=Recreate virtual environment? [y/N]: "
+    if /i "!RECREATE!"=="y" (
+        echo       Removing old .venv...
+        rmdir /s /q .venv
+        python -m venv .venv
+        echo       OK: .venv recreated
+    ) else (
+        echo       OK: Using existing .venv
+    )
 ) else (
     python -m venv .venv
     if errorlevel 1 (
@@ -64,11 +73,11 @@ if exist .venv (
     echo       OK: .venv created
 )
 
-echo [3/5] Activating virtual environment...
+echo [3/6] Activating virtual environment...
 call .venv\Scripts\activate.bat
 echo       OK: Activated
 
-echo [4/5] Installing dependencies...
+echo [4/6] Installing dependencies...
 echo       This may take a few minutes...
 pip install --upgrade pip >nul 2>&1
 pip install -r requirements.txt
@@ -83,7 +92,7 @@ if errorlevel 1 (
 echo       OK: Dependencies installed
 
 echo.
-echo [5/5] Checking GPU support...
+echo [5/6] Checking GPU support...
 echo.
 
 :: Check for NVIDIA GPU via nvidia-smi
@@ -120,18 +129,28 @@ if errorlevel 1 (
 
 echo.
 echo ============================================
-echo  Hotkey Configuration
+echo  [6/6] Configuration
 echo ============================================
+
+:: Check for existing config
+if exist config.py (
+    echo.
+    echo  Existing configuration found.
+    set /p "RECONFIG=Reconfigure settings? [y/N]: "
+    if /i not "!RECONFIG!"=="y" (
+        echo  Keeping existing configuration.
+        goto :install_complete
+    )
+)
+
 echo.
+echo  --- Hotkey ---
 echo  The hotkey is what you hold to record.
 echo  Default: alt+f
 echo.
 echo  AVOID these ^(they conflict with Windows/apps^):
 echo    ctrl+c, ctrl+v, ctrl+x, ctrl+z, ctrl+s
 echo    alt+tab, alt+f4, ctrl+alt+del
-echo.
-echo  GOOD alternatives:
-echo    alt+f, ctrl+shift+d, ctrl+alt+r, alt+`
 echo.
 
 set "HOTKEY=alt+f"
@@ -150,12 +169,52 @@ if not errorlevel 1 (
     )
 )
 
+echo.
+echo  --- Model Size ---
+echo  Larger models are more accurate but slower and use more VRAM.
+echo.
+echo    1. tiny   - Fastest, ~1GB VRAM, less accurate
+echo    2. base   - Fast, ~1GB VRAM, good accuracy
+echo    3. small  - Balanced, ~2GB VRAM ^(recommended^)
+echo    4. medium - Slower, ~5GB VRAM, better accuracy
+echo    5. large  - Slowest, ~10GB VRAM, best accuracy
+echo.
+
+set "MODEL_SIZE=small"
+set /p "MODEL_CHOICE=Choose model [1-5, default=3]: "
+if "!MODEL_CHOICE!"=="1" set "MODEL_SIZE=tiny"
+if "!MODEL_CHOICE!"=="2" set "MODEL_SIZE=base"
+if "!MODEL_CHOICE!"=="3" set "MODEL_SIZE=small"
+if "!MODEL_CHOICE!"=="4" set "MODEL_SIZE=medium"
+if "!MODEL_CHOICE!"=="5" set "MODEL_SIZE=large"
+
+echo.
+echo  --- Language ---
+echo  Language for transcription.
+echo.
+echo    1. English (en) - default
+echo    2. Auto-detect (auto) - slower but works with any language
+echo    3. Spanish (es)
+echo    4. French (fr)
+echo    5. German (de)
+echo    6. Other (enter code)
+echo.
+
+set "LANGUAGE=en"
+set /p "LANG_CHOICE=Choose language [1-6, default=1]: "
+if "!LANG_CHOICE!"=="1" set "LANGUAGE=en"
+if "!LANG_CHOICE!"=="2" set "LANGUAGE=auto"
+if "!LANG_CHOICE!"=="3" set "LANGUAGE=es"
+if "!LANG_CHOICE!"=="4" set "LANGUAGE=fr"
+if "!LANG_CHOICE!"=="5" set "LANGUAGE=de"
+if "!LANG_CHOICE!"=="6" (
+    set /p "LANGUAGE=Enter language code: "
+)
+
 :: Determine device setting
 if "!USE_CPU!"=="1" (
     set "DEVICE=cpu"
     set "COMPUTE_TYPE=int8"
-    echo.
-    echo  Note: Using CPU mode. Transcription will be slower.
 ) else (
     set "DEVICE=cuda"
     set "COMPUTE_TYPE=float16"
@@ -172,8 +231,11 @@ echo Writing configuration...
     echo HOTKEY = '!HOTKEY!'
     echo.
     echo # Whisper model size: tiny, base, small, medium, large
-    echo # Larger = more accurate but slower
-    echo MODEL_SIZE = 'small'
+    echo MODEL_SIZE = '!MODEL_SIZE!'
+    echo.
+    echo # Language for transcription
+    echo # 'en' = English, 'auto' = auto-detect, or specific code
+    echo LANGUAGE = '!LANGUAGE!'
     echo.
     echo # Device: 'cuda' for GPU, 'cpu' for CPU-only
     echo DEVICE = '!DEVICE!'
@@ -185,25 +247,29 @@ echo Writing configuration...
     echo AUDIO_DEVICE = None
 ) > config.py
 
+:install_complete
 echo.
 echo ============================================
 echo  Installation Complete!
 echo ============================================
 echo.
 echo  Your settings:
-echo    Hotkey: !HOTKEY! ^(hold to record, release to transcribe^)
-echo    Device: !DEVICE!
-echo    Model:  small
+echo    Hotkey:   !HOTKEY! ^(hold to record, release to transcribe^)
+echo    Model:    !MODEL_SIZE!
+echo    Language: !LANGUAGE!
+echo    Device:   !DEVICE!
 echo.
 echo  IMPORTANT - First Run:
 echo    The first time you run the tool, it will download the
-echo    Whisper speech model (~500MB). This requires internet.
-echo    Subsequent runs use the cached model and work offline.
+echo    Whisper speech model. This requires internet access.
+echo    Model sizes: tiny ~75MB, base ~150MB, small ~500MB,
+echo                 medium ~1.5GB, large ~3GB
 echo.
 echo  Next steps:
 echo    1. Run test-install.bat to verify everything works
 echo    2. Run start-dictation.bat to use the tool
 echo.
-echo  Tip: If hotkeys don't work, try "Run as administrator"
+echo  To reconfigure later, run install.bat again.
+echo  To uninstall, run uninstall.bat
 echo.
 pause

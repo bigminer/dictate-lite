@@ -5,3 +5,5 @@ soundfile
 numpy
 pyperclip
 edge-tts
+pystray
+Pillow
