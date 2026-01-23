@@ -133,7 +133,7 @@ echo  [6/6] Configuration
 echo ============================================
 
 :: Check for existing config
-if exist config.py (
+if exist src\config.py (
     echo.
     echo  Existing configuration found.
     set /p "RECONFIG=Reconfigure settings? [y/N]: "
@@ -252,7 +252,7 @@ echo Writing configuration...
     echo.
     echo # Copy transcribed text to clipboard in addition to typing
     echo USE_CLIPBOARD = True
-) > config.py
+) > src\config.py
 
 :install_complete
 echo.

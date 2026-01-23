@@ -93,7 +93,7 @@ The installer is idempotent - safe to run multiple times to reconfigure.
    - Text appears in your active window
    - Icon returns to green
 
-   **Note:** Text is also copied to your clipboard as a backup. You can paste (Ctrl+V) if text injection fails in certain applications. Disable with `USE_CLIPBOARD = False` in config.py.
+   **Note:** Text is also copied to your clipboard as a backup. You can paste (Ctrl+V) if text injection fails in certain applications. Disable with `USE_CLIPBOARD = False` in `src/config.py`.
 
 3. **Check status:** Hover over tray icon for current settings
 
@@ -107,7 +107,7 @@ This tool is optimized for single-speaker dictation in reasonably quiet environm
 - **Noisy environments** - Loud ambient noise, machinery, or music
 - **Distant microphone placement** - Speaking far from the microphone
 
-For best results, use a close-range microphone and minimize background noise. If you experience issues with ambient noise, enable noise reduction in `config.py`:
+For best results, use a close-range microphone and minimize background noise. If you experience issues with ambient noise, enable noise reduction in `src/config.py`:
 
 ```python
 NOISE_REDUCTION = True
@@ -119,7 +119,7 @@ This applies audio filtering before transcription, which can help with stationar
 
 Transcribed text is injected into the active window using simulated keystrokes with a 10ms delay between characters. This deliberate throttling prevents crashes in certain terminal applications (notably Claude Code's TUI). The text is also copied to the clipboard by default as a backup.
 
-If clipboard copying interferes with your workflow, disable it in `config.py`:
+If clipboard copying interferes with your workflow, disable it in `src/config.py`:
 
 ```python
 USE_CLIPBOARD = False
@@ -171,7 +171,7 @@ Run `uninstall.bat` to remove:
 
 ## Configuration
 
-After installation, edit `config.py` or re-run `install.bat`:
+After installation, edit `src/config.py` or re-run `install.bat`:
 
 ```python
 HOTKEY = 'alt+f'          # Your recording hotkey
@@ -188,22 +188,22 @@ USE_CLIPBOARD = True      # Copy text to clipboard as backup
 
 | File | Purpose |
 |------|---------|
-| `dictate.py` | Main application - system tray, hotkey, transcription |
-| `speak.py` | Text-to-speech utility (see below) |
+| `src/dictate.py` | Main application - system tray, hotkey, transcription |
+| `src/speak.py` | Text-to-speech utility (see below) |
+| `src/config.py` | Your settings (generated) |
+| `src/config.example.py` | Configuration template |
 | `install.bat` | Setup wizard (safe to re-run) |
 | `uninstall.bat` | Remove installation |
 | `start-dictation.bat` | Launch the tool |
 | `launch.cmd` | Headless launcher with logging |
 | `test-install.bat` | Verify installation |
-| `config.py` | Your settings (generated) |
-| `config.example.py` | Configuration template |
 
 ### speak.py - Text-to-Speech Utility
 
 A standalone utility for text-to-speech using Microsoft Edge's neural voices:
 
 ```
-.venv\Scripts\python speak.py "Hello, this is a test."
+.venv\Scripts\python src\speak.py "Hello, this is a test."
 ```
 
 This is a separate tool from the main dictation functionality and is included for convenience.

@@ -22,10 +22,10 @@ if exist .venv\Scripts\activate.bat (
 
 :: Check for config
 echo [2/5] Checking configuration...
-if exist config.py (
-    echo       OK: config.py exists
+if exist src\config.py (
+    echo       OK: src\config.py exists
 ) else (
-    echo       FAIL: config.py not found. Run install.bat first.
+    echo       FAIL: src\config.py not found. Run install.bat first.
     set /a ERRORS+=1
 )
 

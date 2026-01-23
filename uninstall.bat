@@ -9,7 +9,7 @@ echo ============================================
 echo.
 echo  This will remove:
 echo    - Virtual environment (.venv folder)
-echo    - Configuration file (config.py)
+echo    - Configuration file (src\config.py)
 echo    - Log files (*.log)
 echo.
 echo  Optionally:
@@ -44,12 +44,12 @@ if exist .venv (
 )
 
 :: Remove config file
-if exist config.py (
-    echo  Removing config.py...
-    del /f config.py
-    echo    OK: config.py removed
+if exist src\config.py (
+    echo  Removing src\config.py...
+    del /f src\config.py
+    echo    OK: src\config.py removed
 ) else (
-    echo    config.py not found, skipping
+    echo    src\config.py not found, skipping
 )
 
 :: Remove log files
@@ -66,6 +66,11 @@ if exist __pycache__ (
     echo  Removing __pycache__...
     rmdir /s /q __pycache__
     echo    OK: __pycache__ removed
+)
+if exist src\__pycache__ (
+    echo  Removing src\__pycache__...
+    rmdir /s /q src\__pycache__
+    echo    OK: src\__pycache__ removed
 )
 
 echo.
