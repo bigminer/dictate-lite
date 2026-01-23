@@ -1,3 +1,8 @@
 @echo off
-echo %date% %time% Launching >> "C:\Users\gary.miner\voice-dictation\hook.log"
-start "Voice Dictation" cmd /k "cd /d C:\Users\gary.miner\voice-dictation && python dictate.py"
+cd /d "%~dp0"
+echo %date% %time% Launching >> "%~dp0hook.log"
+if exist .venv\Scripts\pythonw.exe (
+    start "" .venv\Scripts\pythonw.exe dictate.py
+) else (
+    start "" pythonw dictate.py
+)

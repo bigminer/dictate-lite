@@ -1,5 +1,7 @@
 # Voice Dictation Tool
 
+> **Windows Only** - This tool uses Windows-specific APIs for global hotkeys and system tray integration. It will not run on macOS or Linux.
+
 Hold a hotkey to record your voice, release to transcribe and type the text into any application.
 
 Uses OpenAI Whisper (via faster-whisper) with GPU acceleration for fast, accurate transcription. Runs quietly in the system tray.

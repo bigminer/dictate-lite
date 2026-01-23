@@ -1,11 +1,10 @@
 @echo off
-title Voice Dictation
 cd /d "%~dp0"
 
-:: Use venv if it exists, otherwise use system Python
-if exist .venv\Scripts\activate.bat (
-    call .venv\Scripts\activate.bat
+:: Use pythonw (no console window) from venv or system
+if exist .venv\Scripts\pythonw.exe (
+    start "" .venv\Scripts\pythonw.exe dictate.py
+) else (
+    start "" pythonw dictate.py
 )
-
-python dictate.py
-pause
+exit
