@@ -91,6 +91,8 @@ The installer is idempotent - safe to run multiple times to reconfigure.
    - Text appears in your active window
    - Icon returns to green
 
+   **Note:** Text is also copied to your clipboard as a backup. You can paste (Ctrl+V) if text injection fails in certain applications. Disable with `USE_CLIPBOARD = False` in config.py.
+
 3. **Check status:** Hover over tray icon for current settings
 
 4. **Exit:** Right-click tray icon → Exit
