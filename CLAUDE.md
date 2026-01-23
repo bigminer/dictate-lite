@@ -12,6 +12,8 @@ Windows voice dictation utility using GPU-accelerated Whisper transcription. Hol
 - **faster-whisper** - CUDA-optimized Whisper transcription
 - **keyboard** - Global hotkey capture
 - **sounddevice/soundfile** - Audio streaming and I/O
+- **numpy** - Audio array processing
+- **pyperclip** - Clipboard operations for text injection
 - **pystray/Pillow** - System tray icon
 - **edge-tts** - Microsoft neural TTS for speak.py
 
@@ -45,10 +47,11 @@ launch.cmd                 :: Headless with logging to hook.log
 | `config.example.py` | Configuration template |
 | `requirements.txt` | Python dependencies |
 | `README.md` | User-facing setup and troubleshooting |
+| `LICENSE` | MIT License |
 
 ## Architecture
 
-- **System tray**: Colored circle icon (green=ready, red=recording, yellow=processing)
+- **System tray**: Colored circle icon (gray=loading, green=ready, red=recording, yellow=processing)
 - **Single-instance lock**: PID-based lock at `%TEMP%\voice-dictation.lock`
 - **Streaming audio**: Callback-based capture with 16kHz mono float32
 - **Hotkey listener**: Configurable hotkey with suppress=True
