@@ -1,0 +1,7 @@
+faster-whisper
+keyboard
+sounddevice
+soundfile
+numpy
+pyperclip
+edge-tts
