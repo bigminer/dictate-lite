@@ -182,7 +182,18 @@ COMPUTE_TYPE = 'float16'  # 'float16' for GPU, 'int8' for CPU
 AUDIO_DEVICE = None       # None = default, or device index
 NOISE_REDUCTION = False   # True to filter background noise
 USE_CLIPBOARD = True      # Copy text to clipboard as backup
+VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
 ```
+
+### Custom Vocabulary
+
+Whisper sometimes misinterprets names and technical terms. Add them to `VOCABULARY` in `config.py`:
+
+```python
+VOCABULARY = 'Claude, Anthropic, TypeScript, GitHub, JIRA'
+```
+
+This primes the model to recognize these spellings correctly. Just list the words separated by commas - the model learns the correct spelling from context. Restart the app after changing.
 
 ## Files
 

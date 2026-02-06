@@ -29,6 +29,17 @@ AUDIO_DEVICE = None
 # Helps with fans, AC, ambient noise - uses noisereduce library
 NOISE_REDUCTION = False
 
+# Noise gate threshold: minimum RMS level to process audio
+# Skips transcription if audio is too quiet (e.g., accidental hotkey press)
+# 0.0 = disabled (process everything), 0.01 = default, 0.05 = aggressive
+NOISE_GATE_THRESHOLD = 0.01
+
 # Copy transcribed text to clipboard in addition to typing it
 # Useful as backup if text injection fails in some applications
 USE_CLIPBOARD = True
+
+# Custom vocabulary: words/names the model should recognize correctly
+# Comma-separated list of terms (names, technical words, acronyms)
+# The model will be primed to recognize these spellings
+# Example: 'Claude, Anthropic, TypeScript, GitHub, API, JIRA'
+VOCABULARY = ''

@@ -90,9 +90,18 @@ except Exception as e:
 # Single instance lock file
 LOCK_FILE = os.path.join(tempfile.gettempdir(), 'voice-dictation.lock')
 
+# Active microphone name (set by check_microphone)
+active_mic_name = None
+
+# Active audio stream (managed manually for hot-swap device switching)
+audio_stream = None
+
+# Lock to prevent concurrent device switches
+_switch_lock = threading.Lock()
 
 def check_microphone():
     """Check that a microphone is available."""
+    global active_mic_name
     try:
         devices = sd.query_devices()
         input_devices = [d for d in devices if d['max_input_channels'] > 0]
@@ -136,7 +145,9 @@ def check_microphone():
             input("Press Enter to exit...")
             sys.exit(1)
 
-        logger.info(f"Will use input device: {device_info['name']}")
+        # Store device name for tray menu display
+        active_mic_name = device_info['name']
+        logger.info(f"Will use input device: {active_mic_name}")
         return device_info
 
     except Exception as e:
@@ -148,6 +159,16 @@ def check_microphone():
         print()
         input("Press Enter to exit...")
         sys.exit(1)
+
+
+def get_input_devices():
+    """Return list of (index, name) tuples for all input devices."""
+    devices = sd.query_devices()
+    result = []
+    for i, d in enumerate(devices):
+        if d['max_input_channels'] > 0:
+            result.append((i, d['name']))
+    return result
 
 
 def check_single_instance():
@@ -229,6 +250,110 @@ def on_tray_exit(icon, item):
     icon.stop()
     os._exit(0)
 
+
+def on_tray_calibrate(icon, item):
+    """Launch noise gate calibration tool."""
+    import subprocess
+    logger.info("Launching calibration tool...")
+
+    # Get path to calibrate.py
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    calibrate_script = os.path.join(script_dir, 'calibrate.py')
+
+    # sys.executable may be pythonw.exe (windowless) which suppresses console
+    # windows entirely. Use python.exe instead so the calibration console appears.
+    python_exe = sys.executable.replace('pythonw.exe', 'python.exe')
+
+    logger.info(f"Calibrate script: {calibrate_script}")
+    logger.info(f"Python executable: {python_exe}")
+
+    # Launch in new console window
+    try:
+        subprocess.Popen(
+            [python_exe, calibrate_script],
+            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+        logger.info("Calibration process launched")
+    except Exception as e:
+        logger.error(f"Failed to launch calibration: {e}")
+
+
+def save_audio_device_to_config(device_index):
+    """Persist AUDIO_DEVICE to config.py using regex replacement."""
+    import re
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
+
+    if not os.path.exists(config_path):
+        logger.warning(f"config.py not found at {config_path}, cannot persist device selection")
+        return
+
+    with open(config_path, 'r') as f:
+        content = f.read()
+
+    if 'AUDIO_DEVICE' in content:
+        content = re.sub(
+            r'AUDIO_DEVICE\s*=\s*\S+',
+            f'AUDIO_DEVICE = {device_index}',
+            content
+        )
+    else:
+        content += f"\n# Audio device (selected from tray menu)\nAUDIO_DEVICE = {device_index}\n"
+
+    with open(config_path, 'w') as f:
+        f.write(content)
+    logger.info(f"Saved AUDIO_DEVICE = {device_index} to config.py")
+
+
+def switch_audio_device(device_index, device_name):
+    """Switch the audio input to a different device. Hot-swaps the stream."""
+    global AUDIO_DEVICE, audio_stream, active_mic_name
+
+    if is_recording:
+        logger.warning("Cannot switch microphone while recording")
+        return
+
+    if not _switch_lock.acquire(blocking=False):
+        logger.warning("Device switch already in progress")
+        return
+
+    try:
+        logger.info(f"Switching audio device to: [{device_index}] {device_name}")
+
+        # Stop and close current stream
+        if audio_stream is not None:
+            audio_stream.stop()
+            audio_stream.close()
+            logger.info("Old audio stream closed")
+
+        # Update global state
+        AUDIO_DEVICE = device_index
+        active_mic_name = device_name
+
+        # Create and start new stream
+        audio_stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            callback=audio_callback,
+            blocksize=1024,
+            device=AUDIO_DEVICE
+        )
+        audio_stream.start()
+        logger.info(f"New audio stream started on: {device_name}")
+
+        # Persist to config.py
+        save_audio_device_to_config(device_index)
+
+        # Refresh tray menu checkmarks
+        if tray_icon:
+            tray_icon.update_menu()
+
+    except Exception as e:
+        logger.error(f"Failed to switch audio device: {e}")
+    finally:
+        _switch_lock.release()
+
+
 # Configuration - load from config.py if available
 try:
     from config import HOTKEY, MODEL_SIZE, DEVICE, COMPUTE_TYPE, AUDIO_DEVICE, LANGUAGE
@@ -241,6 +366,14 @@ except ImportError:
     COMPUTE_TYPE = 'float16'
     AUDIO_DEVICE = None
     LANGUAGE = 'en'
+
+# Optional config: custom vocabulary for better recognition
+try:
+    from config import VOCABULARY
+    if VOCABULARY:
+        logger.info(f"Custom vocabulary: {VOCABULARY}")
+except ImportError:
+    VOCABULARY = ''
 
 # Optional config: noise reduction (default off)
 try:
@@ -262,6 +395,15 @@ except ImportError:
 
 if USE_CLIPBOARD:
     logger.info("Clipboard copy enabled")
+
+# Optional config: noise gate threshold (minimum RMS level to process audio)
+try:
+    from config import NOISE_GATE_THRESHOLD
+except ImportError:
+    NOISE_GATE_THRESHOLD = 0.01
+
+if NOISE_GATE_THRESHOLD > 0:
+    logger.info(f"Noise gate enabled (threshold={NOISE_GATE_THRESHOLD})")
 
 # Handle 'auto' language setting
 TRANSCRIBE_LANGUAGE = None if LANGUAGE == 'auto' else LANGUAGE
@@ -324,6 +466,14 @@ def stop_recording_and_transcribe():
     # Combine recorded audio
     audio_data = np.concatenate(recorded_frames, axis=0)
 
+    # Check noise gate threshold
+    if NOISE_GATE_THRESHOLD > 0:
+        rms = np.sqrt(np.mean(audio_data ** 2))
+        if rms < NOISE_GATE_THRESHOLD:
+            logger.info(f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}), skipping")
+            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+            return
+
     # Apply noise reduction if enabled
     if NOISE_REDUCTION:
         logger.debug("Applying noise reduction...")
@@ -338,9 +488,15 @@ def stop_recording_and_transcribe():
         sf.write(temp_path, audio_data, SAMPLE_RATE)
 
     try:
-        # Transcribe
+        # Transcribe with custom vocabulary as initial prompt
         start_time = time.time()
-        segments, info = model.transcribe(temp_path, beam_size=5, language=TRANSCRIBE_LANGUAGE)
+        transcribe_opts = {
+            'beam_size': 5,
+            'language': TRANSCRIBE_LANGUAGE,
+        }
+        if VOCABULARY:
+            transcribe_opts['initial_prompt'] = VOCABULARY
+        segments, info = model.transcribe(temp_path, **transcribe_opts)
 
         # Collect text
         text = ' '.join(segment.text for segment in segments).strip()
@@ -386,6 +542,54 @@ def on_hotkey_release():
         stop_recording_and_transcribe()
 
 
+def build_tray_menu():
+    """Build the system tray menu with dynamic microphone submenu."""
+    noise_status = 'On' if NOISE_REDUCTION else 'Off'
+
+    # Build microphone submenu items
+    input_devices = get_input_devices()
+
+    def make_mic_callback(dev_idx, dev_name):
+        """Create a closure for each device menu item."""
+        def callback(icon, item):
+            switch_audio_device(dev_idx, dev_name)
+        return callback
+
+    def make_mic_checked(dev_idx):
+        """Create a checked-state closure for each device menu item."""
+        def is_checked(item):
+            effective = AUDIO_DEVICE if AUDIO_DEVICE is not None else sd.default.device[0]
+            return dev_idx == effective
+        return is_checked
+
+    mic_items = []
+    for dev_idx, dev_name in input_devices:
+        display_name = dev_name if len(dev_name) <= 40 else dev_name[:37] + '...'
+        mic_items.append(
+            pystray.MenuItem(
+                display_name,
+                make_mic_callback(dev_idx, dev_name),
+                checked=make_mic_checked(dev_idx),
+                radio=True
+            )
+        )
+
+    mic_submenu = pystray.Menu(*mic_items) if mic_items else pystray.Menu(
+        pystray.MenuItem('No input devices found', lambda: None, enabled=False)
+    )
+
+    return pystray.Menu(
+        pystray.MenuItem('Select Microphone', mic_submenu),
+        pystray.MenuItem(f'Hotkey: {HOTKEY.upper()}', lambda: None, enabled=False),
+        pystray.MenuItem(f'Model: {MODEL_SIZE}', lambda: None, enabled=False),
+        pystray.MenuItem(f'Language: {LANGUAGE}', lambda: None, enabled=False),
+        pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('Calibrate Noise Gate...', on_tray_calibrate),
+        pystray.MenuItem('Exit', on_tray_exit)
+    )
+
+
 def run_dictation_loop(stream):
     """Run the main dictation loop (hotkey monitoring)."""
     logger.info("Audio stream started")
@@ -423,7 +627,7 @@ def run_dictation_loop(stream):
 
 
 def main():
-    global tray_icon
+    global tray_icon, audio_stream
 
     try:
         # Ensure only one instance runs
@@ -444,9 +648,9 @@ def main():
         load_model()
         logger.info("Model loaded successfully")
 
-        # Start audio stream
+        # Start audio stream (explicit lifecycle for hot-swap device switching)
         logger.info(f"Opening audio stream on device {AUDIO_DEVICE}...")
-        stream = sd.InputStream(
+        audio_stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype='float32',
@@ -454,20 +658,12 @@ def main():
             blocksize=1024,
             device=AUDIO_DEVICE
         )
-        logger.info("Audio stream created")
+        audio_stream.start()
+        logger.info("Audio stream started")
 
-        with stream:
+        try:
             if TRAY_AVAILABLE:
-                # Create system tray icon
-                noise_status = 'On' if NOISE_REDUCTION else 'Off'
-                menu = pystray.Menu(
-                    pystray.MenuItem(f'Hotkey: {HOTKEY.upper()}', lambda: None, enabled=False),
-                    pystray.MenuItem(f'Model: {MODEL_SIZE}', lambda: None, enabled=False),
-                    pystray.MenuItem(f'Language: {LANGUAGE}', lambda: None, enabled=False),
-                    pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
-                    pystray.Menu.SEPARATOR,
-                    pystray.MenuItem('Exit', on_tray_exit)
-                )
+                menu = build_tray_menu()
 
                 tray_icon = pystray.Icon(
                     'voice-dictation',
@@ -478,7 +674,7 @@ def main():
 
                 # Run dictation loop in background thread
                 dictation_thread = threading.Thread(
-                    target=lambda: run_dictation_loop(stream),
+                    target=lambda: run_dictation_loop(audio_stream),
                     daemon=True
                 )
                 dictation_thread.start()
@@ -491,9 +687,20 @@ def main():
                 print("=" * 50)
                 print("  Voice Dictation Tool (faster-whisper)")
                 print("=" * 50)
-                print(f"\nHold [{HOTKEY.upper()}] to record, release to transcribe.")
-                print("Close this window to exit.\n")
-                run_dictation_loop(stream)
+                print(f"\n  Hotkey:     [{HOTKEY.upper()}] (hold to record)")
+                print(f"  Mic:        {active_mic_name}")
+                print(f"  Model:      {MODEL_SIZE}")
+                if NOISE_GATE_THRESHOLD > 0:
+                    print(f"  Noise Gate: {NOISE_GATE_THRESHOLD} (run calibrate.py to adjust)")
+                else:
+                    print(f"  Noise Gate: Disabled")
+                print("\nClose this window to exit.\n")
+                run_dictation_loop(audio_stream)
+        finally:
+            if audio_stream is not None:
+                audio_stream.stop()
+                audio_stream.close()
+                logger.info("Audio stream closed")
 
     except Exception as e:
         logger.exception(f"Fatal error in main: {e}")
