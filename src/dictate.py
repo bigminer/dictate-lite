@@ -100,65 +100,61 @@ audio_stream = None
 _switch_lock = threading.Lock()
 
 def check_microphone():
-    """Check that a microphone is available."""
-    global active_mic_name
+    """Check microphone with fallback: saved device -> system default -> first available.
+    Returns True if a usable mic was found, False otherwise.
+    Updates AUDIO_DEVICE and active_mic_name globals.
+    """
+    global active_mic_name, AUDIO_DEVICE
     try:
         devices = sd.query_devices()
-        input_devices = [d for d in devices if d['max_input_channels'] > 0]
+        input_devices = [(i, d) for i, d in enumerate(devices) if d['max_input_channels'] > 0]
         if not input_devices:
-            print()
-            print("ERROR: No microphone found!")
-            print()
-            print("Please connect a microphone and try again.")
-            print("If you have a microphone connected, check:")
-            print("  1. Windows Settings > Sound > Input")
-            print("  2. Make sure your microphone is selected")
-            print("  3. Check that apps have permission to use microphone")
-            print()
-            input("Press Enter to exit...")
-            sys.exit(1)
+            logger.error("No input devices found on this system")
+            return False
 
-        # Log available devices
         logger.info(f"Found {len(input_devices)} input device(s)")
-        for d in input_devices:
-            logger.debug(f"  - {d['name']}")
+        for i, d in input_devices:
+            logger.debug(f"  [{i}] {d['name']}")
 
-        # Check the specific device we'll use
-        device_idx = AUDIO_DEVICE if AUDIO_DEVICE is not None else sd.default.device[0]
-        if device_idx is None:
-            print()
-            print("ERROR: No default input device configured!")
-            print()
-            print("Please set a default microphone in:")
-            print("  Windows Settings > Sound > Input")
-            print()
-            input("Press Enter to exit...")
-            sys.exit(1)
+        # Try saved device from config first
+        if AUDIO_DEVICE is not None:
+            try:
+                device_info = sd.query_devices(AUDIO_DEVICE)
+                if device_info['max_input_channels'] > 0:
+                    active_mic_name = device_info['name']
+                    logger.info(f"Using saved device: [{AUDIO_DEVICE}] {active_mic_name}")
+                    return True
+                else:
+                    logger.warning(
+                        f"Saved device [{AUDIO_DEVICE}] '{device_info['name']}' "
+                        f"has no input channels, falling back to default"
+                    )
+            except Exception as e:
+                logger.warning(f"Saved device [{AUDIO_DEVICE}] unavailable ({e}), falling back to default")
+            AUDIO_DEVICE = None
 
-        device_info = sd.query_devices(device_idx)
-        if device_info['max_input_channels'] == 0:
-            print()
-            print(f"ERROR: Selected device '{device_info['name']}' has no input channels!")
-            print()
-            print("Please select a microphone device, not a speaker/output.")
-            print()
-            input("Press Enter to exit...")
-            sys.exit(1)
+        # Fall back to system default
+        default_idx = sd.default.device[0]
+        if default_idx is not None:
+            try:
+                device_info = sd.query_devices(default_idx)
+                if device_info['max_input_channels'] > 0:
+                    active_mic_name = device_info['name']
+                    logger.info(f"Using system default device: [{default_idx}] {active_mic_name}")
+                    return True
+            except Exception as e:
+                logger.warning(f"System default device [{default_idx}] failed: {e}")
 
-        # Store device name for tray menu display
-        active_mic_name = device_info['name']
-        logger.info(f"Will use input device: {active_mic_name}")
-        return device_info
+        # Last resort: first available input device
+        first_idx, first_dev = input_devices[0]
+        AUDIO_DEVICE = first_idx
+        active_mic_name = first_dev['name']
+        logger.info(f"Falling back to first available input: [{first_idx}] {active_mic_name}")
+        return True
 
     except Exception as e:
-        logger.exception(f"Error checking microphone: {e}")
-        print()
-        print(f"ERROR: Could not detect audio devices: {e}")
-        print()
-        print("Make sure your audio drivers are installed.")
-        print()
-        input("Press Enter to exit...")
-        sys.exit(1)
+        logger.exception(f"Error enumerating audio devices: {e}")
+        return False
 
 
 def get_input_devices():
@@ -344,6 +340,10 @@ def switch_audio_device(device_index, device_name):
         # Persist to config.py
         save_audio_device_to_config(device_index)
 
+        # Update tray to ready state (handles recovery from error state)
+        if model is not None:
+            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+
         # Refresh tray menu checkmarks
         if tray_icon:
             tray_icon.update_menu()
@@ -427,9 +427,6 @@ def load_model():
         from faster_whisper import WhisperModel
         model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
         logger.info("Model loaded successfully")
-        device_idx = AUDIO_DEVICE if AUDIO_DEVICE is not None else sd.default.device[0]
-        device_name = sd.query_devices(device_idx)['name']
-        logger.info(f"Audio input: {device_name}")
     return model
 
 
@@ -590,10 +587,8 @@ def build_tray_menu():
     )
 
 
-def run_dictation_loop(stream):
+def run_dictation_loop():
     """Run the main dictation loop (hotkey monitoring)."""
-    logger.info("Audio stream started")
-
     # Register hotkey
     logger.info(f"Registering hotkey: {HOTKEY}")
     keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
@@ -616,9 +611,6 @@ def run_dictation_loop(stream):
     release_thread.start()
     logger.info("Release monitor thread started")
 
-    # Update tray to ready state
-    update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
-
     # Keep running until interrupted
     try:
         keyboard.wait()
@@ -626,87 +618,91 @@ def run_dictation_loop(stream):
         logger.info("Received KeyboardInterrupt, exiting...")
 
 
+def init_audio_and_dictation():
+    """Background initialization: mic check, model load, audio stream, hotkey registration.
+    The tray icon is already visible (gray) when this runs.
+    """
+    global audio_stream
+    mic_ok = False
+
+    # Check microphone with fallback chain
+    logger.info("Checking for microphone...")
+    mic_ok = check_microphone()
+    if not mic_ok:
+        update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
+        logger.error("No usable microphone found. Connect a device and select it from the tray menu.")
+
+    # Load model regardless of mic status (so it's ready when user plugs in a mic)
+    try:
+        update_tray_icon('gray', 'Voice Dictation - Loading model...')
+        logger.info("Loading Whisper model...")
+        load_model()
+    except Exception as e:
+        logger.exception(f"Failed to load Whisper model: {e}")
+        update_tray_icon('gray', 'Voice Dictation - Model load failed (see log)')
+        # Still run the hotkey loop so the tray stays alive
+        run_dictation_loop()
+        return
+
+    # Start audio stream if mic was found
+    if mic_ok:
+        try:
+            logger.info(f"Opening audio stream on device {AUDIO_DEVICE}...")
+            audio_stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype='float32',
+                callback=audio_callback,
+                blocksize=1024,
+                device=AUDIO_DEVICE
+            )
+            audio_stream.start()
+            logger.info("Audio stream started")
+            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+        except Exception as e:
+            logger.exception(f"Failed to open audio stream: {e}")
+            update_tray_icon('gray', 'Voice Dictation - Audio error (see log)')
+    else:
+        update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
+
+    # Register hotkey and block (dictation works if stream is active)
+    run_dictation_loop()
+
+
 def main():
-    global tray_icon, audio_stream
+    global tray_icon
 
     try:
         # Ensure only one instance runs
         check_single_instance()
-
         logger.info("Starting main()")
 
-        # Check microphone before anything else
-        logger.info("Checking for microphone...")
-        check_microphone()
-
-        # Show loading state in tray
         if TRAY_AVAILABLE:
-            update_tray_icon('gray', 'Voice Dictation - Loading model...')
+            # Show tray icon immediately so the user sees the app is running
+            menu = build_tray_menu()
+            tray_icon = pystray.Icon(
+                'voice-dictation',
+                create_tray_image('gray'),
+                'Voice Dictation - Starting...',
+                menu
+            )
 
-        # Load model
-        logger.info("Loading Whisper model...")
-        load_model()
-        logger.info("Model loaded successfully")
+            # Run mic check, model load, and dictation in background thread
+            init_thread = threading.Thread(target=init_audio_and_dictation, daemon=True)
+            init_thread.start()
 
-        # Start audio stream (explicit lifecycle for hot-swap device switching)
-        logger.info(f"Opening audio stream on device {AUDIO_DEVICE}...")
-        audio_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype='float32',
-            callback=audio_callback,
-            blocksize=1024,
-            device=AUDIO_DEVICE
-        )
-        audio_stream.start()
-        logger.info("Audio stream started")
-
-        try:
-            if TRAY_AVAILABLE:
-                menu = build_tray_menu()
-
-                tray_icon = pystray.Icon(
-                    'voice-dictation',
-                    create_tray_image('gray'),
-                    'Voice Dictation - Loading...',
-                    menu
-                )
-
-                # Run dictation loop in background thread
-                dictation_thread = threading.Thread(
-                    target=lambda: run_dictation_loop(audio_stream),
-                    daemon=True
-                )
-                dictation_thread.start()
-
-                # Run tray icon (blocks until exit)
-                logger.info("Starting system tray icon")
-                tray_icon.run()
-            else:
-                # Fallback to console mode
-                print("=" * 50)
-                print("  Voice Dictation Tool (faster-whisper)")
-                print("=" * 50)
-                print(f"\n  Hotkey:     [{HOTKEY.upper()}] (hold to record)")
-                print(f"  Mic:        {active_mic_name}")
-                print(f"  Model:      {MODEL_SIZE}")
-                if NOISE_GATE_THRESHOLD > 0:
-                    print(f"  Noise Gate: {NOISE_GATE_THRESHOLD} (run calibrate.py to adjust)")
-                else:
-                    print(f"  Noise Gate: Disabled")
-                print("\nClose this window to exit.\n")
-                run_dictation_loop(audio_stream)
-        finally:
-            if audio_stream is not None:
-                audio_stream.stop()
-                audio_stream.close()
-                logger.info("Audio stream closed")
+            # Run tray icon on main thread (blocks until exit)
+            logger.info("Starting system tray icon")
+            tray_icon.run()
+        else:
+            # Console mode - run init synchronously
+            print("=" * 50)
+            print("  Voice Dictation Tool (faster-whisper)")
+            print("=" * 50)
+            init_audio_and_dictation()
 
     except Exception as e:
         logger.exception(f"Fatal error in main: {e}")
-        if not TRAY_AVAILABLE:
-            print(f"Error: {e}")
-            input("Press Enter to exit...")
         raise
 
 
