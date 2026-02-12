@@ -29,15 +29,55 @@ AMBIENT_DURATION = 3.0  # seconds
 SPEECH_DURATION = 4.0   # seconds
 
 
-def get_device_name():
-    """Get the name of the audio device we'll use."""
-    device_idx = AUDIO_DEVICE if AUDIO_DEVICE is not None else sd.default.device[0]
-    if device_idx is not None:
-        return sd.query_devices(device_idx)['name']
-    return "Default"
+def resolve_audio_device():
+    """Resolve AUDIO_DEVICE to a device index with fallback chain.
+    Handles string names (current format), integer indices (legacy), and None (default).
+    Returns (device_index_or_None, device_name_str).
+    """
+    global AUDIO_DEVICE
+    devices = sd.query_devices()
+    input_devices = [(i, d) for i, d in enumerate(devices) if d['max_input_channels'] > 0]
+
+    if not input_devices:
+        print("ERROR: No input devices found on this system")
+        sys.exit(1)
+
+    if AUDIO_DEVICE is not None:
+        if isinstance(AUDIO_DEVICE, str):
+            # Name-based lookup: exact match then substring
+            for idx, dev in input_devices:
+                if dev['name'] == AUDIO_DEVICE:
+                    return idx, dev['name']
+            for idx, dev in input_devices:
+                if AUDIO_DEVICE in dev['name'] or dev['name'] in AUDIO_DEVICE:
+                    print(f"  Matched device by substring: '{AUDIO_DEVICE}' -> [{idx}] '{dev['name']}'")
+                    return idx, dev['name']
+            print(f"  WARNING: Saved device '{AUDIO_DEVICE}' not found, falling back to default")
+        elif isinstance(AUDIO_DEVICE, int):
+            print(f"  NOTE: AUDIO_DEVICE is a legacy integer index ({AUDIO_DEVICE})")
+            try:
+                device_info = sd.query_devices(AUDIO_DEVICE)
+                if device_info['max_input_channels'] > 0:
+                    return AUDIO_DEVICE, device_info['name']
+            except Exception:
+                print(f"  WARNING: Legacy device index {AUDIO_DEVICE} unavailable, falling back")
+
+    # Fall back to system default
+    default_idx = sd.default.device[0]
+    if default_idx is not None and default_idx >= 0:
+        try:
+            device_info = sd.query_devices(default_idx)
+            if device_info['max_input_channels'] > 0:
+                return default_idx, device_info['name']
+        except Exception:
+            pass
+
+    # Last resort: first available input device
+    first_idx, first_dev = input_devices[0]
+    return first_idx, first_dev['name']
 
 
-def record_audio(duration, prompt):
+def record_audio(duration, prompt, device_index):
     """Record audio for specified duration with countdown."""
     print(f"\n{prompt}")
     print(f"Recording starts in: ", end='', flush=True)
@@ -47,14 +87,19 @@ def record_audio(duration, prompt):
         time.sleep(1)
     print("GO!")
 
-    # Record
-    recording = sd.rec(
-        int(duration * SAMPLE_RATE),
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype='float32',
-        device=AUDIO_DEVICE
-    )
+    # Record with try/except for device open failures
+    try:
+        recording = sd.rec(
+            int(duration * SAMPLE_RATE),
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            device=device_index
+        )
+    except Exception as e:
+        print(f"\n  ERROR: Failed to open audio device for recording: {e}")
+        print("  Please check your microphone connection and try again.")
+        sys.exit(1)
 
     # Show progress
     for i in range(int(duration)):
@@ -114,7 +159,11 @@ def main():
     print("=" * 60)
     print("  NOISE GATE CALIBRATION")
     print("=" * 60)
-    print(f"\n  Microphone: {get_device_name()}")
+
+    # Resolve device with fallback chain
+    device_index, device_name = resolve_audio_device()
+    print(f"\n  Microphone: {device_name} [index {device_index}]")
+
     print("\n  This tool automatically sets your noise gate threshold.")
     print("  You do NOT need to use the dictation hotkey.")
     print("\n  Two recordings will be made:")
@@ -127,7 +176,8 @@ def main():
     # Step 1: Record ambient noise
     ambient_audio = record_audio(
         AMBIENT_DURATION,
-        "STEP 1: Stay quiet. Recording ambient noise..."
+        "STEP 1: Stay quiet. Recording ambient noise...",
+        device_index
     )
     ambient_rms = calculate_rms(ambient_audio)
     ambient_peak = calculate_peak(ambient_audio)
@@ -140,7 +190,8 @@ def main():
     # Step 2: Record speech
     speech_audio = record_audio(
         SPEECH_DURATION,
-        "STEP 2: Speak normally. Say: 'Just focus on my voice'"
+        "STEP 2: Speak normally. Say: 'Just focus on my voice'",
+        device_index
     )
     speech_rms = calculate_rms(speech_audio)
     speech_peak = calculate_peak(speech_audio)
@@ -165,7 +216,13 @@ def main():
     print("=" * 50)
     print(f"\n  Ambient RMS:     {ambient_rms:.4f}")
     print(f"  Speech RMS:      {speech_rms:.4f}")
-    print(f"  Ratio:           {speech_rms/ambient_rms:.1f}x louder")
+
+    # Guard against division by zero when ambient is silent
+    if ambient_rms > 0:
+        print(f"  Ratio:           {speech_rms/ambient_rms:.1f}x louder")
+    else:
+        print(f"  Ratio:           N/A (ambient was silent)")
+
     print(f"\n  Recommended threshold: {threshold}")
 
     # Sanity check

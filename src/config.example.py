@@ -22,7 +22,10 @@ DEVICE = 'cuda'
 # Compute type: 'float16' for GPU, 'int8' or 'float32' for CPU
 COMPUTE_TYPE = 'float16'
 
-# Audio device index: None = system default, or specify device number
+# Audio device: None = system default, or device name string
+# e.g., AUDIO_DEVICE = 'Microphone (USB Audio)'
+# Using a name (not index) ensures the correct device is found even if
+# device indices change across reboots or when USB devices are re-plugged.
 AUDIO_DEVICE = None
 
 # Noise reduction: True to filter background noise before transcription
