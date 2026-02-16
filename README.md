@@ -86,7 +86,7 @@ The installer is idempotent - safe to run multiple times to reconfigure.
    A startup healthcheck opens in the command window:
    - Validates microphone stream health
    - Prompts you to say **"check 1 2 3"**
-   - Verifies transcription before background launch
+   - Verifies transcription before background launch (up to 3 attempts)
    - Displays previous runtime state from `%LOCALAPPDATA%\VoiceDictation\state.json`
    A colored circle then appears in your system tray.
    
@@ -106,7 +106,9 @@ The installer is idempotent - safe to run multiple times to reconfigure.
 
 3. **Check status:** Hover over tray icon for current settings
 
-4. **Exit:** Right-click tray icon → Exit
+4. **Run healthcheck while app is running:** Right-click tray icon → `Run Startup Healthcheck...`
+
+5. **Exit:** Right-click tray icon → Exit
 
 ## Limitations
 
@@ -212,6 +214,8 @@ This primes the model to recognize these spellings correctly. Just list the word
 | File | Purpose |
 |------|---------|
 | `src/dictate.py` | Main application - system tray, hotkey, transcription |
+| `src/audio_device_identity.py` | Shared microphone identity, UID, and fallback resolution helpers |
+| `src/runtime_state.py` | Shared runtime state read/write helpers (`%LOCALAPPDATA%\VoiceDictation\state.json`) |
 | `src/speak.py` | Text-to-speech utility (see below) |
 | `src/config.py` | Your settings (generated) |
 | `src/config.example.py` | Configuration template |
@@ -221,6 +225,13 @@ This primes the model to recognize these spellings correctly. Just list the word
 | `src/startup_healthcheck.py` | Operational preflight + spoken phrase verification |
 | `launch.cmd` | Headless launcher with logging |
 | `test-install.bat` | Verify installation |
+
+### Tests
+
+- `tests/test_dictate.py` - core tray/hotkey/transcription behavior
+- `tests/test_calibrate.py` - calibration and fallback behavior
+- `tests/test_audio_device_identity.py` - shared device identity and resolution logic
+- `tests/test_runtime_state.py` - shared runtime state persistence helpers
 
 ### speak.py - Text-to-Speech Utility
 

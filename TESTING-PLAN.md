@@ -8,7 +8,7 @@
 
 ## How to Use This Plan
 
-Start with the automated tests — they run in under a second and catch logic regressions
+Start with the automated tests — they run in about a second and catch logic regressions
 without any hardware. Then work through the manual sections in order.
 
 Tests marked with **[A]** have automated coverage. If `pytest` passes, you can skip those
@@ -18,7 +18,7 @@ steps or just skim them as a sanity check.
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-> 61 tests | ~0.5 seconds | No microphone or GPU needed
+> 70 tests | ~1.0 seconds | No microphone or GPU needed
 
 <br>
 
@@ -277,6 +277,14 @@ Keep these open while testing:
 - [ ] **4A.3** &ensp; Unmute. The warning is cosmetic — app still works.
   Dictating after unmuting produces transcription.
 
+- [ ] **4A.4** &ensp; Launch `start-dictation.bat` and intentionally fail the first phrase attempt
+  (silence or wrong phrase), then pass on a later attempt. Healthcheck retries in-place
+  (up to 3 attempts) without relaunching.
+
+- [ ] **4A.5** &ensp; While the tray app is running, right-click tray icon →
+  **Run Startup Healthcheck...**. Healthcheck opens in a new console and completes
+  without stopping the running tray process.
+
 <br>
 
 ### 4B — Recording Timeout
@@ -446,7 +454,7 @@ Keep these open while testing:
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-**61 tests across 15 test classes:**
+**70 tests across 15 test classes plus 2 module-level suites:**
 
 | Group | File | Test Class | Count |
 |:-----:|------|------------|:-----:|
@@ -465,6 +473,8 @@ Keep these open while testing:
 | C | `test_dictate.py` | `TestStopRecordingCorruptionGuard` | 5 |
 | C | `test_dictate.py` | `TestSilenceDetection` | 3 |
 | -- | `test_dictate.py` | `TestAudioDeviceStringCompatibility` | 2 |
+| D | `test_audio_device_identity.py` | *(module-level tests)* | 5 |
+| D | `test_runtime_state.py` | *(module-level tests)* | 4 |
 
 <br>
 

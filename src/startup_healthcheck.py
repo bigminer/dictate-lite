@@ -13,20 +13,20 @@ import re
 import sys
 import tempfile
 import time
-import hashlib
-import json
 import argparse
 
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+import audio_device_identity as audio_identity
+import runtime_state
+
 
 TARGET_PROMPT = 'check 1 2 3'
 SAMPLE_RATE = 16000
 RECORD_SECONDS = 3.5
-STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'VoiceDictation')
-STATE_FILE = os.path.join(STATE_DIR, 'state.json')
+MAX_PHRASE_ATTEMPTS = 3
 
 
 def load_config():
@@ -70,80 +70,13 @@ def load_config():
 
 def load_runtime_state():
     """Load prior runtime state written by dictate.py."""
-    if not os.path.exists(STATE_FILE):
-        return {}
-
-    try:
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def normalize_device_name(name):
-    return ' '.join(str(name).strip().lower().split())
-
-
-def build_device_uid(device_name, hostapi_name, device_info):
-    max_input = int(device_info.get('max_input_channels') or 0)
-    max_output = int(device_info.get('max_output_channels') or 0)
-
-    def fmt_float(value):
-        try:
-            return f"{float(value):.3f}"
-        except Exception:
-            return 'na'
-
-    fingerprint = '|'.join([
-        normalize_device_name(device_name),
-        str(hostapi_name or ''),
-        str(max_input),
-        str(max_output),
-        fmt_float(device_info.get('default_samplerate')),
-        fmt_float(device_info.get('default_low_input_latency')),
-        fmt_float(device_info.get('default_high_input_latency')),
-    ])
-    return hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]
+    return runtime_state.read_runtime_state()
 
 
 def enumerate_input_devices():
     """Return input device tuples: (index, name, hostapi_name, device_uid)."""
-    devices = sd.query_devices()
-    hostapis = sd.query_hostapis()
-
-    result = []
-    for idx, dev in enumerate(devices):
-        if dev['max_input_channels'] <= 0:
-            continue
-        hostapi_index = dev.get('hostapi')
-        hostapi_name = 'Unknown'
-        if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
-            hostapi_name = hostapis[hostapi_index]['name']
-        device_uid = build_device_uid(dev['name'], hostapi_name, dev)
-        result.append((idx, dev['name'], hostapi_name, device_uid))
-    return result
-
-
-def choose_candidate(candidates, preferred_index=None, default_index=None):
-    if not candidates:
-        return None
-
-    if preferred_index is not None:
-        for c in candidates:
-            if c[0] == preferred_index:
-                return c
-
-    if default_index is not None:
-        for c in candidates:
-            if c[0] == default_index:
-                return c
-
-    wasapi = [c for c in candidates if c[2] == 'Windows WASAPI']
-    if wasapi:
-        return wasapi[0]
-
-    return candidates[0]
+    devices = audio_identity.enumerate_input_devices(sd)
+    return [(idx, name, hostapi_name, device_uid) for idx, name, hostapi_name, _, device_uid in devices]
 
 
 def resolve_device(cfg, input_devices):
@@ -152,70 +85,18 @@ def resolve_device(cfg, input_devices):
     saved_hostapi = cfg['AUDIO_DEVICE_HOSTAPI']
     saved_index = cfg['AUDIO_DEVICE_INDEX']
     saved_uid = cfg['AUDIO_DEVICE_UID']
-
-    default_idx = sd.default.device[0]
-    if not isinstance(default_idx, int) or default_idx < 0:
-        default_idx = None
-
-    if isinstance(saved_uid, str) and saved_uid:
-        exact_uid = [d for d in input_devices if d[3] == saved_uid]
-        chosen = choose_candidate(exact_uid, preferred_index=saved_index, default_index=default_idx)
-        if chosen:
-            return chosen
-
-    if isinstance(saved_name, str) and saved_name:
-        exact = [d for d in input_devices if d[1] == saved_name]
-        if saved_hostapi:
-            exact_host = [d for d in exact if d[2] == saved_hostapi]
-            if exact_host:
-                exact = exact_host
-
-        chosen = choose_candidate(exact, preferred_index=saved_index, default_index=default_idx)
-        if chosen:
-            return chosen
-
-        partial = [d for d in input_devices if saved_name in d[1] or d[1] in saved_name]
-        if saved_hostapi:
-            partial_host = [d for d in partial if d[2] == saved_hostapi]
-            if partial_host:
-                partial = partial_host
-
-        chosen = choose_candidate(partial, preferred_index=saved_index, default_index=default_idx)
-        if chosen:
-            return chosen
-
-    if isinstance(saved_name, int):
-        try:
-            dev = sd.query_devices(saved_name)
-            if dev['max_input_channels'] > 0:
-                hostapi_name = 'Unknown'
-                hostapis = sd.query_hostapis()
-                hidx = dev.get('hostapi')
-                if isinstance(hidx, int) and 0 <= hidx < len(hostapis):
-                    hostapi_name = hostapis[hidx]['name']
-                device_uid = build_device_uid(dev['name'], hostapi_name, dev)
-                return (saved_name, dev['name'], hostapi_name, device_uid)
-        except Exception:
-            pass
-
-    if default_idx is not None:
-        try:
-            dev = sd.query_devices(default_idx)
-            if dev['max_input_channels'] > 0:
-                hostapi_name = 'Unknown'
-                hostapis = sd.query_hostapis()
-                hidx = dev.get('hostapi')
-                if isinstance(hidx, int) and 0 <= hidx < len(hostapis):
-                    hostapi_name = hostapis[hidx]['name']
-                device_uid = build_device_uid(dev['name'], hostapi_name, dev)
-                return (default_idx, dev['name'], hostapi_name, device_uid)
-        except Exception:
-            pass
-
-    if input_devices:
-        return input_devices[0]
-
-    return None
+    resolved = audio_identity.resolve_preferred_input_device(
+        sd,
+        [(idx, name, hostapi_name, None, uid) for idx, name, hostapi_name, uid in input_devices],
+        saved_name=saved_name,
+        saved_hostapi=saved_hostapi,
+        saved_index=saved_index,
+        saved_uid=saved_uid
+    )
+    idx, name, hostapi_name, uid = resolved
+    if idx is None:
+        return None
+    return idx, name, hostapi_name, uid
 
 
 def stream_probe(device_index):
@@ -359,44 +240,55 @@ def run_healthcheck():
 
     print()
     print(f"Say this phrase clearly when prompted: \"{TARGET_PROMPT}\"")
-    try:
-        input('Press ENTER to begin recording...')
-    except EOFError:
-        print('[FAIL] Interactive input is not available in this session.')
-        print('       Re-run in a normal terminal window to complete phrase verification.')
-        return False
-    print('Recording starts in 3...')
-    time.sleep(1)
-    print('2...')
-    time.sleep(1)
-    print('1...')
-    time.sleep(1)
-
-    try:
-        audio = record_phrase(device_index)
-    except Exception as e:
-        print(f"[FAIL] Recording failed ({type(e).__name__}: {e})")
-        return False
-
-    rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
-    print(f"[INFO] Captured audio RMS: {rms:.6f}")
-    if rms < 1e-6:
-        print('[FAIL] Captured silence. Check mic mute/privacy settings and try again.')
-        return False
-
-    try:
-        text = transcribe_audio(cfg, audio)
-    except Exception as e:
-        print(f"[FAIL] Transcription failed ({type(e).__name__}: {e})")
-        return False
-
-    print(f"[INFO] Heard: {text if text else '<empty>'}")
-
-    if phrase_matched(text):
+    for attempt in range(1, MAX_PHRASE_ATTEMPTS + 1):
         print()
-        print('[PASS] Healthcheck succeeded.')
-        print('       Voice detection is operational. You can close this window.')
-        return True
+        print(f"[INFO] Phrase check attempt {attempt}/{MAX_PHRASE_ATTEMPTS}")
+        try:
+            input('Press ENTER to begin recording...')
+        except EOFError:
+            print('[FAIL] Interactive input is not available in this session.')
+            print('       Re-run in a normal terminal window to complete phrase verification.')
+            return False
+
+        print('Recording starts in 3...')
+        time.sleep(1)
+        print('2...')
+        time.sleep(1)
+        print('1...')
+        time.sleep(1)
+
+        try:
+            audio = record_phrase(device_index)
+        except Exception as e:
+            print(f"[FAIL] Recording failed ({type(e).__name__}: {e})")
+            return False
+
+        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+        print(f"[INFO] Captured audio RMS: {rms:.6f}")
+        if rms < 1e-6:
+            print('[WARN] Captured silence. Check mic mute/privacy settings and try again.')
+            if attempt < MAX_PHRASE_ATTEMPTS:
+                continue
+            print('[FAIL] Phrase verification failed after repeated silence.')
+            return False
+
+        try:
+            text = transcribe_audio(cfg, audio)
+        except Exception as e:
+            print(f"[FAIL] Transcription failed ({type(e).__name__}: {e})")
+            return False
+
+        print(f"[INFO] Heard: {text if text else '<empty>'}")
+
+        if phrase_matched(text):
+            print()
+            print('[PASS] Healthcheck succeeded.')
+            print('       Voice detection is operational. You can close this window.')
+            return True
+
+        print(f"[WARN] Phrase mismatch on attempt {attempt}.")
+        if attempt < MAX_PHRASE_ATTEMPTS:
+            print('       Please try again and speak clearly near the microphone.')
 
     print()
     print('[FAIL] Phrase verification did not match expected text.')

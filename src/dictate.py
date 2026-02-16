@@ -13,24 +13,21 @@ import time
 import atexit
 import signal
 import logging
-import hashlib
-import json
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
+
+import audio_device_identity as audio_identity
+import runtime_state
 
 # Set up logging FIRST before any other imports that might fail
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'voice-dictation')
 LOG_FILE = os.path.join(LOG_DIR, 'dictation.log')
 os.makedirs(LOG_DIR, exist_ok=True)
 
-STATE_DIR = os.path.join(os.environ.get('LOCALAPPDATA') or os.path.expanduser('~'), 'VoiceDictation')
-STATE_FILE = os.path.join(STATE_DIR, 'state.json')
-os.makedirs(STATE_DIR, exist_ok=True)
-
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -41,7 +38,7 @@ logger.info("Voice Dictation starting...")
 logger.info(f"Python: {sys.version}")
 logger.info(f"Working dir: {os.getcwd()}")
 logger.info(f"Log file: {LOG_FILE}")
-logger.info(f"State file: {STATE_FILE}")
+logger.info(f"State file: {runtime_state.STATE_FILE}")
 
 try:
     import keyboard
@@ -120,69 +117,26 @@ _switch_lock = threading.Lock()
 
 def _normalize_device_name(name):
     """Normalize device name for stable identity hashing."""
-    return ' '.join(str(name).strip().lower().split())
+    return audio_identity.normalize_device_name(name)
 
 
 def _build_device_uid(device_name, hostapi_name, device_info):
     """Build a stable UID from microphone metadata."""
-    max_input = int(device_info.get('max_input_channels') or 0)
-    max_output = int(device_info.get('max_output_channels') or 0)
-
-    def _fmt_float(value):
-        try:
-            return f"{float(value):.3f}"
-        except Exception:
-            return 'na'
-
-    fingerprint = '|'.join([
-        _normalize_device_name(device_name),
-        str(hostapi_name or ''),
-        str(max_input),
-        str(max_output),
-        _fmt_float(device_info.get('default_samplerate')),
-        _fmt_float(device_info.get('default_low_input_latency')),
-        _fmt_float(device_info.get('default_high_input_latency')),
-    ])
-    return hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]
+    return audio_identity.build_device_uid(device_name, hostapi_name, device_info)
 
 
 def _enumerate_input_devices():
     """Return input tuples: (index, name, hostapi_name, hostapi_index, device_uid)."""
-    devices = sd.query_devices()
-    hostapis = sd.query_hostapis()
-    result = []
-    for idx, dev in enumerate(devices):
-        if dev['max_input_channels'] <= 0:
-            continue
-        hostapi_index = dev.get('hostapi')
-        hostapi_name = 'Unknown'
-        if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
-            hostapi_name = hostapis[hostapi_index]['name']
-        device_uid = _build_device_uid(dev['name'], hostapi_name, dev)
-        result.append((idx, dev['name'], hostapi_name, hostapi_index, device_uid))
-    return result
+    return audio_identity.enumerate_input_devices(sd)
 
 
 def _choose_candidate(candidates, preferred_index=None, default_index=None):
     """Choose a device tuple from candidates with deterministic preference order."""
-    if not candidates:
-        return None
-
-    if preferred_index is not None:
-        for candidate in candidates:
-            if candidate[0] == preferred_index:
-                return candidate
-
-    if default_index is not None:
-        for candidate in candidates:
-            if candidate[0] == default_index:
-                return candidate
-
-    wasapi = [c for c in candidates if c[2] == 'Windows WASAPI']
-    if wasapi:
-        return wasapi[0]
-
-    return candidates[0]
+    return audio_identity.choose_candidate(
+        candidates,
+        preferred_index=preferred_index,
+        default_index=default_index
+    )
 
 
 def _resolve_device_name_to_index(
@@ -202,50 +156,27 @@ def _resolve_device_name_to_index(
     For ambiguous matches, prefer saved index then system default index then WASAPI.
     Returns (index, name, hostapi_name, device_uid) or (None, None, None, None).
     """
-    if not device_name:
-        return None, None, None, None
-
-    exact = [d for d in input_devices if d[1] == device_name]
-    if preferred_hostapi:
-        exact_host = [d for d in exact if d[2] == preferred_hostapi]
-        if exact_host:
-            exact = exact_host
-
-    chosen = _choose_candidate(exact, preferred_index=preferred_index, default_index=default_index)
-    if chosen:
-        if len(exact) > 1:
-            logger.warning(
-                f"Multiple exact matches for '{device_name}'. Using [{chosen[0]}] '{chosen[1]}' ({chosen[2]})."
-            )
-        return chosen[0], chosen[1], chosen[2], chosen[4]
-
-    partial = [d for d in input_devices if device_name in d[1] or d[1] in device_name]
-    if preferred_hostapi:
-        partial_host = [d for d in partial if d[2] == preferred_hostapi]
-        if partial_host:
-            partial = partial_host
-
-    chosen = _choose_candidate(partial, preferred_index=preferred_index, default_index=default_index)
-    if chosen:
-        logger.info(
-            f"Matched device by substring: '{device_name}' -> [{chosen[0]}] '{chosen[1]}' ({chosen[2]})"
-        )
-        return chosen[0], chosen[1], chosen[2], chosen[4]
-
-    return None, None, None, None
+    # Keep wrapper for compatibility with existing tests/call sites.
+    resolved = audio_identity.resolve_device_name(
+        device_name,
+        input_devices,
+        preferred_hostapi=preferred_hostapi,
+        preferred_index=preferred_index,
+        default_index=default_index
+    )
+    idx, name, hostapi_name, uid = resolved
+    if idx is not None:
+        logger.info(f"Resolved device by name: [{idx}] '{name}' ({hostapi_name}) uid={uid}")
+    return resolved
 
 
 def _resolve_device_uid_to_index(device_uid, input_devices, default_index=None):
     """Resolve saved UID to an input device tuple."""
-    if not isinstance(device_uid, str) or not device_uid.strip():
-        return None, None, None, None
-
-    matches = [d for d in input_devices if d[4] == device_uid]
-    chosen = _choose_candidate(matches, default_index=default_index)
-    if chosen:
-        return chosen[0], chosen[1], chosen[2], chosen[4]
-
-    return None, None, None, None
+    return audio_identity.resolve_device_uid(
+        device_uid,
+        input_devices,
+        default_index=default_index
+    )
 
 
 def check_microphone():
@@ -260,7 +191,6 @@ def check_microphone():
     """
     global active_mic_name, active_mic_index, active_mic_hostapi
     global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
-    global last_device_topology_signature
     global last_device_topology_signature
     active_mic_name = None
     active_mic_index = None
@@ -277,181 +207,51 @@ def check_microphone():
             logger.debug(f"    uid={device_uid}")
         last_device_topology_signature = _current_input_topology_signature(input_devices)
 
-        device_by_index = {
-            idx: (name, hostapi_name, device_uid)
-            for idx, name, hostapi_name, _, device_uid in input_devices
-        }
+        prior_name = AUDIO_DEVICE
+        prior_hostapi = AUDIO_DEVICE_HOSTAPI
+        prior_index = AUDIO_DEVICE_INDEX
+        prior_uid = AUDIO_DEVICE_UID
 
-        default_idx = sd.default.device[0]
-        if not isinstance(default_idx, int) or default_idx < 0:
-            default_idx = None
+        resolved_idx, resolved_name, resolved_hostapi, resolved_uid = audio_identity.resolve_preferred_input_device(
+            sd,
+            input_devices,
+            saved_name=AUDIO_DEVICE,
+            saved_hostapi=AUDIO_DEVICE_HOSTAPI,
+            saved_index=AUDIO_DEVICE_INDEX,
+            saved_uid=AUDIO_DEVICE_UID
+        )
 
-        # Try saved UID first (strongest identity)
-        if AUDIO_DEVICE_UID:
-            resolved_idx, resolved_name, resolved_hostapi, resolved_uid = _resolve_device_uid_to_index(
-                AUDIO_DEVICE_UID, input_devices, default_index=default_idx
-            )
-            if resolved_idx is not None:
-                prior_name = AUDIO_DEVICE
-                prior_hostapi = AUDIO_DEVICE_HOSTAPI
-                prior_index = AUDIO_DEVICE_INDEX
-                prior_uid = AUDIO_DEVICE_UID
-                active_mic_name = resolved_name
-                active_mic_index = resolved_idx
-                active_mic_hostapi = resolved_hostapi
-                AUDIO_DEVICE = resolved_name
-                AUDIO_DEVICE_HOSTAPI = resolved_hostapi
-                AUDIO_DEVICE_INDEX = resolved_idx
-                AUDIO_DEVICE_UID = resolved_uid
-                if (
-                    prior_name != resolved_name
-                    or prior_hostapi != resolved_hostapi
-                    or prior_index != resolved_idx
-                    or prior_uid != resolved_uid
-                ):
-                    save_audio_device_to_config(
-                        resolved_name,
-                        resolved_hostapi,
-                        resolved_idx,
-                        device_uid=resolved_uid
-                    )
-                logger.info(
-                    f"Using saved device UID: [{resolved_idx}] {active_mic_name} ({resolved_hostapi}) uid={resolved_uid}"
-                )
-                return True
-            logger.warning(f"Saved device UID '{AUDIO_DEVICE_UID}' not found, falling back to name/default")
-
-        # Try saved device name from config next
-        if AUDIO_DEVICE is not None:
-            if isinstance(AUDIO_DEVICE, str):
-                resolved_idx, resolved_name, resolved_hostapi, resolved_uid = _resolve_device_name_to_index(
-                    AUDIO_DEVICE,
-                    input_devices,
-                    preferred_hostapi=AUDIO_DEVICE_HOSTAPI,
-                    preferred_index=AUDIO_DEVICE_INDEX,
-                    default_index=default_idx
-                )
-                if resolved_idx is not None:
-                    prior_hostapi = AUDIO_DEVICE_HOSTAPI
-                    prior_index = AUDIO_DEVICE_INDEX
-                    prior_uid = AUDIO_DEVICE_UID
-                    active_mic_name = resolved_name
-                    active_mic_index = resolved_idx
-                    active_mic_hostapi = resolved_hostapi
-                    AUDIO_DEVICE = resolved_name
-                    AUDIO_DEVICE_HOSTAPI = resolved_hostapi
-                    AUDIO_DEVICE_INDEX = resolved_idx
-                    AUDIO_DEVICE_UID = resolved_uid
-                    if (
-                        prior_hostapi != resolved_hostapi
-                        or prior_index != resolved_idx
-                        or prior_uid != resolved_uid
-                    ):
-                        save_audio_device_to_config(
-                            resolved_name,
-                            resolved_hostapi,
-                            resolved_idx,
-                            device_uid=resolved_uid
-                        )
-                    logger.info(
-                        f"Using saved device identity: [{resolved_idx}] {active_mic_name} ({resolved_hostapi}) uid={resolved_uid}"
-                    )
-                    return True
-                else:
-                    logger.warning(f"Saved device name '{AUDIO_DEVICE}' not found, falling back to default")
-            elif isinstance(AUDIO_DEVICE, int):
-                logger.warning(f"AUDIO_DEVICE is an integer ({AUDIO_DEVICE}). Integer indices are deprecated.")
-                try:
-                    legacy_index = AUDIO_DEVICE
-                    legacy_entry = device_by_index.get(legacy_index)
-                    if legacy_entry is not None:
-                        legacy_name, legacy_hostapi, legacy_uid = legacy_entry
-                        active_mic_name = legacy_name
-                        active_mic_index = legacy_index
-                        active_mic_hostapi = legacy_hostapi
-                        AUDIO_DEVICE = active_mic_name
-                        AUDIO_DEVICE_HOSTAPI = legacy_hostapi
-                        AUDIO_DEVICE_INDEX = legacy_index
-                        AUDIO_DEVICE_UID = legacy_uid
-                        save_audio_device_to_config(
-                            active_mic_name,
-                            legacy_hostapi,
-                            legacy_index,
-                            device_uid=legacy_uid
-                        )
-                        logger.info(
-                            f"Migrated legacy index to identity: '{active_mic_name}' ({legacy_hostapi}) uid={legacy_uid}"
-                        )
-                        return True
-                    device_info = sd.query_devices(legacy_index)
-                    if device_info['max_input_channels'] > 0:
-                        active_mic_name = device_info['name']
-                        active_mic_index = legacy_index
-                        hostapi_index = device_info.get('hostapi')
-                        hostapi_name = 'Unknown'
-                        hostapis = sd.query_hostapis()
-                        if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
-                            hostapi_name = hostapis[hostapi_index]['name']
-                        active_mic_hostapi = hostapi_name
-                        legacy_uid = _build_device_uid(active_mic_name, hostapi_name, device_info)
-                        AUDIO_DEVICE = active_mic_name
-                        AUDIO_DEVICE_HOSTAPI = hostapi_name
-                        AUDIO_DEVICE_INDEX = legacy_index
-                        AUDIO_DEVICE_UID = legacy_uid
-                        save_audio_device_to_config(
-                            active_mic_name,
-                            hostapi_name,
-                            legacy_index,
-                            device_uid=legacy_uid
-                        )
-                        logger.info(
-                            f"Migrated legacy index to identity: '{active_mic_name}' ({hostapi_name}) uid={legacy_uid}"
-                        )
-                        return True
-                    logger.warning(f"Legacy device [{AUDIO_DEVICE}] has no input channels, falling back")
-                except Exception as e:
-                    logger.warning(f"Legacy device index [{AUDIO_DEVICE}] unavailable ({e}), falling back")
+        if resolved_idx is None:
+            logger.error("Failed to resolve any usable microphone device")
             AUDIO_DEVICE = None
             AUDIO_DEVICE_HOSTAPI = None
             AUDIO_DEVICE_INDEX = None
             AUDIO_DEVICE_UID = None
-            active_mic_index = None
+            return False
 
-        # Fall back to system default
-        if default_idx is not None:
-            default_candidate = device_by_index.get(default_idx)
-            if default_candidate is not None:
-                active_mic_name, hostapi_name, device_uid = default_candidate
-                active_mic_index = default_idx
-                active_mic_hostapi = hostapi_name
-                AUDIO_DEVICE = active_mic_name
-                AUDIO_DEVICE_HOSTAPI = hostapi_name
-                AUDIO_DEVICE_INDEX = default_idx
-                AUDIO_DEVICE_UID = device_uid
-                save_audio_device_to_config(
-                    active_mic_name,
-                    hostapi_name,
-                    default_idx,
-                    device_uid=device_uid
-                )
-                logger.info(
-                    f"Using system default device: [{default_idx}] {active_mic_name} ({hostapi_name}) uid={device_uid} (persisted)"
-                )
-                return True
-            logger.warning(f"System default device [{default_idx}] not in input list, falling back")
+        active_mic_name = resolved_name
+        active_mic_index = resolved_idx
+        active_mic_hostapi = resolved_hostapi
+        AUDIO_DEVICE = resolved_name
+        AUDIO_DEVICE_HOSTAPI = resolved_hostapi
+        AUDIO_DEVICE_INDEX = resolved_idx
+        AUDIO_DEVICE_UID = resolved_uid
 
-        # Last resort: first available input device
-        first_idx, first_name, first_hostapi, _, first_uid = input_devices[0]
-        active_mic_name = first_name
-        active_mic_index = first_idx
-        active_mic_hostapi = first_hostapi
-        AUDIO_DEVICE = active_mic_name
-        AUDIO_DEVICE_HOSTAPI = first_hostapi
-        AUDIO_DEVICE_INDEX = first_idx
-        AUDIO_DEVICE_UID = first_uid
-        save_audio_device_to_config(active_mic_name, first_hostapi, first_idx, device_uid=first_uid)
+        if (
+            prior_name != resolved_name
+            or prior_hostapi != resolved_hostapi
+            or prior_index != resolved_idx
+            or prior_uid != resolved_uid
+        ):
+            save_audio_device_to_config(
+                resolved_name,
+                resolved_hostapi,
+                resolved_idx,
+                device_uid=resolved_uid
+            )
+
         logger.info(
-            f"Falling back to first available input: [{first_idx}] {active_mic_name} ({first_hostapi}) uid={first_uid} (persisted)"
+            f"Using resolved microphone: [{resolved_idx}] {active_mic_name} ({resolved_hostapi}) uid={resolved_uid}"
         )
         return True
 
@@ -478,17 +278,7 @@ def _current_input_topology_signature(input_devices=None):
     """Return a deterministic signature for currently available input devices."""
     if input_devices is None:
         input_devices = _enumerate_input_devices()
-
-    entries = []
-    for idx, name, hostapi_name, _, device_uid in input_devices:
-        entries.append((
-            str(device_uid or ''),
-            str(hostapi_name or ''),
-            _normalize_device_name(name),
-            int(idx)
-        ))
-    entries.sort()
-    return tuple(entries)
+    return audio_identity.current_input_topology_signature(input_devices)
 
 
 def _is_python_process(pid):
@@ -765,6 +555,28 @@ def on_tray_calibrate(icon, item):
         logger.error(f"Failed to launch calibration: {e}")
 
 
+def on_tray_healthcheck(icon, item):
+    """Launch startup healthcheck in a separate console window."""
+    import subprocess
+    logger.info("Launching startup healthcheck...")
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    healthcheck_script = os.path.join(script_dir, 'startup_healthcheck.py')
+    python_exe = sys.executable.replace('pythonw.exe', 'python.exe')
+
+    logger.info(f"Healthcheck script: {healthcheck_script}")
+    logger.info(f"Python executable: {python_exe}")
+
+    try:
+        subprocess.Popen(
+            [python_exe, healthcheck_script, '--healthcheck-only'],
+            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+        logger.info("Healthcheck process launched")
+    except Exception as e:
+        logger.error(f"Failed to launch healthcheck: {e}")
+
+
 def _atomic_write_text(path, content, encoding='utf-8'):
     """Write text atomically (temp file + replace) to avoid partial config writes."""
     directory = os.path.dirname(path)
@@ -793,36 +605,17 @@ def _atomic_write_text(path, content, encoding='utf-8'):
 
 def _read_runtime_state():
     """Read runtime state JSON. Returns {} when missing or invalid."""
-    if not os.path.exists(STATE_FILE):
-        return {}
-
-    try:
-        with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception as e:
-        logger.warning(f"Unable to read runtime state file '{STATE_FILE}': {e}")
-    return {}
+    return runtime_state.read_runtime_state(logger=logger)
 
 
 def _write_runtime_state(status, reason=None, details=None):
     """Atomically persist runtime lifecycle state."""
-    state = _read_runtime_state()
-    state['status'] = status
-    state['updated_at'] = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
-    state['pid'] = os.getpid()
-    if reason is not None:
-        state['reason'] = reason
-    if details is not None:
-        state['details'] = details
-
-    try:
-        os.makedirs(STATE_DIR, exist_ok=True)
-        payload = json.dumps(state, indent=2, sort_keys=True) + '\n'
-        _atomic_write_text(STATE_FILE, payload, encoding='utf-8')
-    except Exception as e:
-        logger.warning(f"Unable to write runtime state file '{STATE_FILE}': {e}")
+    runtime_state.write_runtime_state(
+        status=status,
+        reason=reason,
+        details=details,
+        logger=logger
+    )
 
 
 def save_audio_device_to_config(device_name, device_hostapi=None, device_index=None, device_uid=None):
@@ -1290,6 +1083,7 @@ def build_tray_menu():
         pystray.MenuItem(f'Language: {LANGUAGE}', lambda: None, enabled=False),
         pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem('Run Startup Healthcheck...', on_tray_healthcheck),
         pystray.MenuItem('Calibrate Noise Gate...', on_tray_calibrate),
         pystray.MenuItem('Exit', on_tray_exit)
     )
