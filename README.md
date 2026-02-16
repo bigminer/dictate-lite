@@ -214,6 +214,8 @@ This primes the model to recognize these spellings correctly. Just list the word
 
 ## Files
 
+Architecture diagrams are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 | File | Purpose |
 |------|---------|
 | `src/dictate.py` | Main application - system tray, hotkey, transcription |
