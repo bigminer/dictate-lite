@@ -102,7 +102,7 @@ The installer is idempotent - safe to run multiple times to reconfigure.
    - Text appears in your active window
    - Icon returns to green
 
-   **Note:** Text is also copied to your clipboard as a backup. You can paste (Ctrl+V) if text injection fails in certain applications. Disable with `USE_CLIPBOARD = False` in `src/config.py`.
+   **Note:** Clipboard backup is disabled by default. Enable `USE_CLIPBOARD = True` in `src/config.py` if you want every transcript copied as backup.
 
 3. **Check status:** Hover over tray icon for current settings
 
@@ -128,12 +128,12 @@ This applies audio filtering before transcription, which can help with stationar
 
 ### Text Injection Behavior
 
-Transcribed text is injected into the active window using simulated keystrokes with a 10ms delay between characters. This deliberate throttling prevents crashes in certain terminal applications (notably Claude Code's TUI). The text is also copied to the clipboard by default as a backup.
+Transcribed text is injected into the active window using simulated keystrokes with a 10ms delay between characters. This deliberate throttling prevents crashes in certain terminal applications (notably Claude Code's TUI).
 
-If clipboard copying interferes with your workflow, disable it in `src/config.py`:
+If you want clipboard backup, enable it in `src/config.py`:
 
 ```python
-USE_CLIPBOARD = False
+USE_CLIPBOARD = True
 ```
 
 ## Uninstalling
@@ -195,7 +195,9 @@ AUDIO_DEVICE_HOSTAPI = None  # Saved host API (auto-managed)
 AUDIO_DEVICE_INDEX = None    # Saved preferred index (auto-managed)
 AUDIO_DEVICE_UID = None      # Saved stable device fingerprint (auto-managed)
 NOISE_REDUCTION = False   # True to filter background noise
-USE_CLIPBOARD = True      # Copy text to clipboard as backup
+USE_CLIPBOARD = False     # Copy text to clipboard as backup (opt-in)
+LOG_TRANSCRIPT_TEXT = False  # Log transcript snippets (debug only)
+MAX_TYPED_CHARS = 1000    # Maximum characters typed per utterance
 VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
 ```
 

@@ -18,6 +18,7 @@ class DictationAppState:
     last_device_topology_signature: tuple | None = None
 
     is_recording: bool = False
+    is_processing: bool = False
     recorded_frames: list = field(default_factory=list)
     recording_start_time: float = 0.0
     last_callback_time: float = 0.0

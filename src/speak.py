@@ -41,7 +41,7 @@ async def speak(text, voice='en-US-BrianNeural'):
     startupinfo.wShowWindow = 0  # SW_HIDE
 
     subprocess.run(
-        ['powershell', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+        ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps_script],
         capture_output=True,
         startupinfo=startupinfo
     )

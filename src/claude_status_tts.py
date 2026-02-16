@@ -10,6 +10,10 @@ Usage: Configure in ~/.claude/settings.json:
     "command": "python C:\\Users\\gary.miner\\voice-dictation\\src\\claude_status_tts.py",
     "padding": 0
   }
+
+Optional environment overrides:
+  CCSTATUSLINE_PACKAGE=ccstatusline@2.0.25  (must be version-pinned)
+  CCSTATUSLINE_COMMAND="ccstatusline --compact"
 """
 
 import sys
@@ -17,6 +21,7 @@ import json
 import subprocess
 import time
 import os
+import shlex
 
 # Configuration
 WARN_THRESHOLD = 20  # Percentage at which to warn
@@ -24,6 +29,7 @@ CRITICAL_THRESHOLD = 10  # Percentage for critical warning
 COOLDOWN_SECONDS = 120  # Don't repeat warning within this time
 
 SPEAK_SCRIPT = os.path.join(os.path.dirname(__file__), "speak.py")
+CCSTATUSLINE_PACKAGE = os.environ.get('CCSTATUSLINE_PACKAGE', 'ccstatusline@2.0.25')
 
 # State tracking
 last_warn_time = 0
@@ -65,20 +71,41 @@ def check_context_alert(remaining_pct):
             speak_async(f"Context alert: {remaining_pct} percent remaining.")
             last_warn_time = current_time
 
+
+def build_ccstatusline_command():
+    """Return command tokens for launching ccstatusline without shell execution."""
+    custom = os.environ.get('CCSTATUSLINE_COMMAND')
+    if custom:
+        return shlex.split(custom, posix=False)
+
+    if '@' not in CCSTATUSLINE_PACKAGE or CCSTATUSLINE_PACKAGE.endswith('@latest'):
+        raise ValueError(
+            f'CCSTATUSLINE_PACKAGE must be version-pinned (got: {CCSTATUSLINE_PACKAGE})'
+        )
+
+    return ['npx', '-y', CCSTATUSLINE_PACKAGE]
+
+
 def main():
     """Read status JSON from stdin, check for context alerts, pass through to ccstatusline."""
+    try:
+        ccstatusline_cmd = build_ccstatusline_command()
+    except ValueError as e:
+        print(f'[claude_status_tts] {e}', file=sys.stderr)
+        sys.exit(2)
+
     # Start ccstatusline as subprocess to handle actual display
     ccstatusline = subprocess.Popen(
-        ["npx", "-y", "ccstatusline@latest"],
+        ccstatusline_cmd,
         stdin=subprocess.PIPE,
-        shell=True
+        text=True
     )
 
     try:
         for line in sys.stdin:
             # Pass through to ccstatusline for display
             if ccstatusline.stdin:
-                ccstatusline.stdin.write(line.encode())
+                ccstatusline.stdin.write(line)
                 ccstatusline.stdin.flush()
 
             # Parse and check for context alerts

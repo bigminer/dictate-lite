@@ -43,8 +43,16 @@ NOISE_REDUCTION = False
 NOISE_GATE_THRESHOLD = 0.01
 
 # Copy transcribed text to clipboard in addition to typing it
-# Useful as backup if text injection fails in some applications
-USE_CLIPBOARD = True
+# Disabled by default to reduce accidental sensitive-data persistence.
+USE_CLIPBOARD = False
+
+# Log transcript text snippets to dictation.log
+# Keep False unless actively debugging recognition quality.
+LOG_TRANSCRIPT_TEXT = False
+
+# Hard cap on typed characters per utterance
+# Prevents accidental multi-thousand-character injections if transcription goes wrong.
+MAX_TYPED_CHARS = 1000
 
 # Custom vocabulary: words/names the model should recognize correctly
 # Comma-separated list of terms (names, technical words, acronyms)

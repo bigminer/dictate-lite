@@ -602,9 +602,10 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
     """
     global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
 
-    if STATE.is_recording:
-        logger.warning("Cannot switch microphone while recording")
-        return
+    with STATE.lock:
+        if STATE.is_recording or STATE.is_processing:
+            logger.warning("Cannot switch microphone while recording or processing")
+            return
 
     if not _switch_lock.acquire(blocking=False):
         logger.warning("Device switch already in progress")
@@ -747,14 +748,34 @@ if NOISE_REDUCTION and not NOISEREDUCE_AVAILABLE:
 elif NOISE_REDUCTION:
     logger.info("Noise reduction enabled")
 
-# Optional config: clipboard copy (default on)
+# Optional config: clipboard copy (default off)
 try:
     from config import USE_CLIPBOARD
 except Exception:
-    USE_CLIPBOARD = True
+    USE_CLIPBOARD = False
 
 if USE_CLIPBOARD:
     logger.info("Clipboard copy enabled")
+
+# Optional config: transcript text logging (default off for privacy)
+try:
+    from config import LOG_TRANSCRIPT_TEXT
+except Exception:
+    LOG_TRANSCRIPT_TEXT = False
+
+if LOG_TRANSCRIPT_TEXT:
+    logger.warning("Transcript text logging is enabled; this may capture sensitive data in logs")
+
+# Optional config: hard cap on typed characters per utterance
+try:
+    from config import MAX_TYPED_CHARS
+except Exception:
+    MAX_TYPED_CHARS = 1000
+
+if not isinstance(MAX_TYPED_CHARS, int):
+    MAX_TYPED_CHARS = 1000
+if MAX_TYPED_CHARS < 1:
+    MAX_TYPED_CHARS = 1
 
 # Optional config: noise gate threshold (minimum RMS level to process audio)
 try:
@@ -793,31 +814,56 @@ def audio_callback(indata, frames, time_info, status):
     STATE.last_callback_time = time.time()
     if status:
         logger.warning(f"Audio status: {status}")
-    if STATE.is_recording:
-        STATE.recorded_frames.append(indata.copy())
-        # Lightweight silence detection: check if this block is near-silent
-        # and set a flag for the monitor thread to act on (avoid heavy work in callback)
-        rms = np.sqrt(np.mean(indata ** 2))
-        STATE.silence_flag = bool(rms < 1e-6)
+    if not STATE.is_recording:
+        return
+
+    frame = indata.copy()
+    # Lightweight silence detection: check if this block is near-silent
+    # and set a flag for the monitor thread to act on (avoid heavy work in callback)
+    rms = np.sqrt(np.mean(frame ** 2))
+    is_silent = bool(rms < 1e-6)
+
+    with STATE.lock:
+        if STATE.is_recording:
+            STATE.recorded_frames.append(frame)
+            STATE.silence_flag = is_silent
 
 
 def start_recording():
     """Start recording audio."""
-    STATE.recorded_frames = []
-    STATE.silence_flag = False
-    STATE.recording_start_time = time.time()
-    STATE.is_recording = True
+    with STATE.lock:
+        if STATE.is_recording:
+            return False
+        if STATE.is_processing:
+            logger.info("Ignoring hotkey press while prior transcription is still processing")
+            return False
+        STATE.recorded_frames = []
+        STATE.silence_flag = False
+        STATE.recording_start_time = time.time()
+        STATE.is_recording = True
     update_tray_icon('red', 'Voice Dictation - Recording...')
     logger.info("Recording started")
+    return True
 
 
 def stop_recording_and_transcribe():
     """Stop recording, transcribe, and type the result."""
-    STATE.is_recording = False
+    with STATE.lock:
+        if not STATE.is_recording:
+            return
+        STATE.is_recording = False
+        if STATE.is_processing:
+            logger.debug("stop_recording ignored: transcription already in progress")
+            return
+        STATE.is_processing = True
+        recorded_frames = list(STATE.recorded_frames)
+        STATE.recorded_frames = []
 
-    if not STATE.recorded_frames:
+    if not recorded_frames:
         logger.info("No audio captured")
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+        with STATE.lock:
+            STATE.is_processing = False
         return
 
     update_tray_icon('yellow', 'Voice Dictation - Processing...')
@@ -825,10 +871,12 @@ def stop_recording_and_transcribe():
 
     # Combine recorded audio with corruption guard
     try:
-        audio_data = np.concatenate(STATE.recorded_frames, axis=0)
+        audio_data = np.concatenate(recorded_frames, axis=0)
     except (ValueError, TypeError) as e:
         logger.error(f"Failed to concatenate audio frames (corrupt data?): {e}")
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+        with STATE.lock:
+            STATE.is_processing = False
         return
 
     # Check minimum duration (< 0.1s is too short to transcribe)
@@ -836,6 +884,8 @@ def stop_recording_and_transcribe():
     if duration_s < 0.1:
         logger.info(f"Audio too short ({duration_s:.3f}s < 0.1s), skipping transcription")
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+        with STATE.lock:
+            STATE.is_processing = False
         return
 
     # Check noise gate threshold
@@ -844,6 +894,8 @@ def stop_recording_and_transcribe():
         if rms < NOISE_GATE_THRESHOLD:
             logger.info(f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}), skipping")
             update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+            with STATE.lock:
+                STATE.is_processing = False
             return
 
     # Apply noise reduction if enabled
@@ -871,12 +923,20 @@ def stop_recording_and_transcribe():
             **transcribe_opts,
         )
         text = transcription_io.sanitize_transcript_text(raw_text)
+        if len(text) > MAX_TYPED_CHARS:
+            logger.warning(
+                f"Transcript length {len(text)} exceeds MAX_TYPED_CHARS={MAX_TYPED_CHARS}; truncating output"
+            )
+            text = text[:MAX_TYPED_CHARS].rstrip()
         elapsed = time.time() - start_time
 
         if text:
             if raw_text != text:
                 logger.info("Transcript normalized before output")
-            logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
+            if LOG_TRANSCRIPT_TEXT:
+                logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
+            else:
+                logger.info(f"Transcribed ({elapsed:.1f}s), {len(text)} chars")
 
             # Copy to clipboard if enabled
             if USE_CLIPBOARD:
@@ -895,19 +955,22 @@ def stop_recording_and_transcribe():
     except Exception as e:
         logger.error(f"Transcription error: {e}")
     finally:
+        with STATE.lock:
+            STATE.is_processing = False
         # Reset tray icon to ready state
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
 
 
 def on_hotkey_press():
     """Called when hotkey is pressed."""
-    if not STATE.is_recording:
-        start_recording()
+    start_recording()
 
 
 def on_hotkey_release():
     """Called when hotkey is released."""
-    if STATE.is_recording:
+    with STATE.lock:
+        is_recording = STATE.is_recording
+    if is_recording:
         stop_recording_and_transcribe()
 
 
@@ -1018,7 +1081,12 @@ def _recording_state_watchdog():
     """Monitor timeout/silence and fallback key-release detection while recording."""
     silence_warned = False
     while not STATE.shutdown_event.is_set():
-        if STATE.is_recording and STATE.recording_start_time > 0:
+        with STATE.lock:
+            is_recording = STATE.is_recording
+            recording_start_time = STATE.recording_start_time
+            silence_flag = STATE.silence_flag
+
+        if is_recording and recording_start_time > 0:
             if not _is_hotkey_currently_pressed():
                 logger.info("Recording stop fallback triggered: hotkey no longer pressed")
                 silence_warned = False
@@ -1026,7 +1094,7 @@ def _recording_state_watchdog():
                 STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
                 continue
 
-            elapsed = time.time() - STATE.recording_start_time
+            elapsed = time.time() - recording_start_time
             if elapsed > MAX_RECORDING_SECONDS:
                 logger.warning(f"Recording timeout after {MAX_RECORDING_SECONDS}s - force stopping")
                 silence_warned = False
@@ -1034,10 +1102,10 @@ def _recording_state_watchdog():
                 STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
                 continue
 
-            if STATE.silence_flag and not silence_warned:
+            if silence_flag and not silence_warned:
                 silence_warned = True
                 update_tray_icon('red', 'Recording - Warning: mic may be muted')
-            elif not STATE.silence_flag and silence_warned:
+            elif not silence_flag and silence_warned:
                 silence_warned = False
                 update_tray_icon('red', 'Voice Dictation - Recording...')
         else:
@@ -1093,6 +1161,10 @@ def test_microphone():
 
 def _reopen_audio_stream(recovery_reason):
     """Try to reopen the current stream target. Returns True on success."""
+    if not _switch_lock.acquire(blocking=False):
+        logger.info(f"Skipping stream recovery ({recovery_reason}): switch already in progress")
+        return False
+
     update_tray_icon('gray', f'Voice Dictation - Recovering audio ({recovery_reason})')
 
     try:
@@ -1113,6 +1185,8 @@ def _reopen_audio_stream(recovery_reason):
         update_tray_icon('gray', 'Voice Dictation - Audio error (see log)')
         _write_runtime_state('audio_error', reason=f'recovery_failed:{recovery_reason}', details=str(e))
         return False
+    finally:
+        _switch_lock.release()
 
 
 def stream_health_watchdog():
@@ -1130,7 +1204,10 @@ def stream_health_watchdog():
             break
 
         # Don't interfere while actively recording.
-        if STATE.is_recording:
+        with STATE.lock:
+            is_recording = STATE.is_recording
+            is_processing = STATE.is_processing
+        if is_recording or is_processing:
             continue
 
         # Detect device topology changes (dock/undock, device add/remove).

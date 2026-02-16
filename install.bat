@@ -260,7 +260,14 @@ echo Writing configuration...
     echo NOISE_REDUCTION = False
     echo.
     echo # Copy transcribed text to clipboard in addition to typing
-    echo USE_CLIPBOARD = True
+    echo # Disabled by default to reduce accidental sensitive-data persistence
+    echo USE_CLIPBOARD = False
+    echo.
+    echo # Log transcript text snippets to dictation.log ^(debugging only^)
+    echo LOG_TRANSCRIPT_TEXT = False
+    echo.
+    echo # Hard cap on typed characters per utterance
+    echo MAX_TYPED_CHARS = 1000
 ) > src\config.py
 
 :: Check if model changed and needs download
