@@ -34,6 +34,23 @@ echo ============================================
 echo  Removing local files...
 echo ============================================
 
+:: Stop running dictation processes (if any)
+echo  Stopping running Voice Dictation processes...
+powershell -NoProfile -Command ^
+    "$procs = Get-CimInstance Win32_Process -Filter \"name='python.exe' OR name='pythonw.exe'\" | Where-Object { $_.CommandLine -like '*src\\dictate.py*' }; if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Write-Host '   OK: Stopped running dictation processes' } else { Write-Host '   No running dictation process found' }"
+
+:: Remove lock file if present
+if exist "%TEMP%\voice-dictation.lock" (
+    del /f "%TEMP%\voice-dictation.lock" >nul 2>&1
+    echo    OK: Removed stale lock file
+)
+
+:: Remove runtime state file if present
+if exist "%LOCALAPPDATA%\VoiceDictation\state.json" (
+    del /f "%LOCALAPPDATA%\VoiceDictation\state.json" >nul 2>&1
+    echo    OK: Removed runtime state file
+)
+
 :: Remove virtual environment
 if exist .venv (
     echo  Removing .venv...

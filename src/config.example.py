@@ -22,11 +22,16 @@ DEVICE = 'cuda'
 # Compute type: 'float16' for GPU, 'int8' or 'float32' for CPU
 COMPUTE_TYPE = 'float16'
 
-# Audio device: None = system default, or device name string
-# e.g., AUDIO_DEVICE = 'Microphone (USB Audio)'
-# Using a name (not index) ensures the correct device is found even if
-# device indices change across reboots or when USB devices are re-plugged.
+# Saved audio device identity.
+# Leave all three as None to use the current system default microphone.
+# AUDIO_DEVICE stores the friendly name shown in menus.
+# AUDIO_DEVICE_HOSTAPI and AUDIO_DEVICE_INDEX are auto-managed to disambiguate
+# duplicate names across MME / DirectSound / WASAPI.
+# AUDIO_DEVICE_UID is a derived stable fingerprint used first during resolution.
 AUDIO_DEVICE = None
+AUDIO_DEVICE_HOSTAPI = None
+AUDIO_DEVICE_INDEX = None
+AUDIO_DEVICE_UID = None
 
 # Noise reduction: True to filter background noise before transcription
 # Helps with fans, AC, ambient noise - uses noisereduce library

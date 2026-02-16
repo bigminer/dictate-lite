@@ -6,6 +6,7 @@ Records ambient noise and speech to automatically calculate optimal threshold.
 import sys
 import os
 import time
+import hashlib
 import numpy as np
 
 # Add src directory to path for config import
@@ -18,40 +19,136 @@ except ImportError:
     print("Run: pip install sounddevice")
     sys.exit(1)
 
-# Load audio device from config if available
+# Load audio device identity from config if available
 try:
-    from config import AUDIO_DEVICE
-except ImportError:
+    from config import AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
+except Exception:
     AUDIO_DEVICE = None
+    AUDIO_DEVICE_HOSTAPI = None
+    AUDIO_DEVICE_INDEX = None
+    AUDIO_DEVICE_UID = None
+
+if isinstance(AUDIO_DEVICE_INDEX, str):
+    stripped = AUDIO_DEVICE_INDEX.strip()
+    AUDIO_DEVICE_INDEX = int(stripped) if stripped.isdigit() else None
+
+if isinstance(AUDIO_DEVICE_UID, str):
+    AUDIO_DEVICE_UID = AUDIO_DEVICE_UID.strip() or None
 
 SAMPLE_RATE = 16000
 AMBIENT_DURATION = 3.0  # seconds
 SPEECH_DURATION = 4.0   # seconds
 
 
-def resolve_audio_device():
-    """Resolve AUDIO_DEVICE to a device index with fallback chain.
-    Handles string names (current format), integer indices (legacy), and None (default).
-    Returns (device_index_or_None, device_name_str).
-    """
-    global AUDIO_DEVICE
+def _normalize_device_name(name):
+    return ' '.join(str(name).strip().lower().split())
+
+
+def _build_device_uid(device_name, hostapi_name, device_info):
+    max_input = int(device_info.get('max_input_channels') or 0)
+    max_output = int(device_info.get('max_output_channels') or 0)
+
+    def _fmt_float(value):
+        try:
+            return f"{float(value):.3f}"
+        except Exception:
+            return 'na'
+
+    fingerprint = '|'.join([
+        _normalize_device_name(device_name),
+        str(hostapi_name or ''),
+        str(max_input),
+        str(max_output),
+        _fmt_float(device_info.get('default_samplerate')),
+        _fmt_float(device_info.get('default_low_input_latency')),
+        _fmt_float(device_info.get('default_high_input_latency')),
+    ])
+    return hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]
+
+
+def _enumerate_input_devices():
+    """Return list of input devices as tuples: (index, name, hostapi_name, device_uid)."""
     devices = sd.query_devices()
-    input_devices = [(i, d) for i, d in enumerate(devices) if d['max_input_channels'] > 0]
+    hostapis = sd.query_hostapis()
+    result = []
+    for idx, dev in enumerate(devices):
+        if dev['max_input_channels'] <= 0:
+            continue
+        hostapi_index = dev.get('hostapi')
+        hostapi_name = 'Unknown'
+        if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
+            hostapi_name = hostapis[hostapi_index]['name']
+        device_uid = _build_device_uid(dev['name'], hostapi_name, dev)
+        result.append((idx, dev['name'], hostapi_name, device_uid))
+    return result
+
+
+def _choose_candidate(candidates, preferred_index=None, default_index=None):
+    if not candidates:
+        return None
+    if preferred_index is not None:
+        for c in candidates:
+            if c[0] == preferred_index:
+                return c
+    if default_index is not None:
+        for c in candidates:
+            if c[0] == default_index:
+                return c
+    wasapi = [c for c in candidates if c[2] == 'Windows WASAPI']
+    if wasapi:
+        return wasapi[0]
+    return candidates[0]
+
+
+def resolve_audio_device():
+    """Resolve configured device identity with fallback chain across host APIs."""
+    global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
+    input_devices = _enumerate_input_devices()
 
     if not input_devices:
         print("ERROR: No input devices found on this system")
         sys.exit(1)
 
+    default_idx = sd.default.device[0]
+    if not isinstance(default_idx, int) or default_idx < 0:
+        default_idx = None
+
+    if AUDIO_DEVICE_UID:
+        uid_matches = [d for d in input_devices if d[3] == AUDIO_DEVICE_UID]
+        chosen = _choose_candidate(uid_matches, preferred_index=AUDIO_DEVICE_INDEX, default_index=default_idx)
+        if chosen:
+            return chosen[0], chosen[1]
+        print(f"  WARNING: Saved AUDIO_DEVICE_UID '{AUDIO_DEVICE_UID}' not found, falling back")
+
     if AUDIO_DEVICE is not None:
         if isinstance(AUDIO_DEVICE, str):
-            # Name-based lookup: exact match then substring
-            for idx, dev in input_devices:
-                if dev['name'] == AUDIO_DEVICE:
-                    return idx, dev['name']
-            for idx, dev in input_devices:
-                if AUDIO_DEVICE in dev['name'] or dev['name'] in AUDIO_DEVICE:
-                    print(f"  Matched device by substring: '{AUDIO_DEVICE}' -> [{idx}] '{dev['name']}'")
-                    return idx, dev['name']
+            exact = [d for d in input_devices if d[1] == AUDIO_DEVICE]
+            if AUDIO_DEVICE_HOSTAPI:
+                exact_host = [d for d in exact if d[2] == AUDIO_DEVICE_HOSTAPI]
+                if exact_host:
+                    exact = exact_host
+            chosen = _choose_candidate(exact, preferred_index=AUDIO_DEVICE_INDEX, default_index=default_idx)
+            if chosen:
+                if len(exact) > 1:
+                    print(
+                        f"  NOTE: Multiple exact matches for '{AUDIO_DEVICE}', using [{chosen[0]}] "
+                        f"'{chosen[1]}' ({chosen[2]})"
+                    )
+                return chosen[0], chosen[1]
+
+            partial = [d for d in input_devices if AUDIO_DEVICE in d[1] or d[1] in AUDIO_DEVICE]
+            if AUDIO_DEVICE_HOSTAPI:
+                partial_host = [d for d in partial if d[2] == AUDIO_DEVICE_HOSTAPI]
+                if partial_host:
+                    partial = partial_host
+            chosen = _choose_candidate(partial, preferred_index=AUDIO_DEVICE_INDEX, default_index=default_idx)
+            if chosen:
+                print(
+                    f"  Matched device by substring: '{AUDIO_DEVICE}' -> "
+                    f"[{chosen[0]}] '{chosen[1]}' ({chosen[2]})"
+                )
+                return chosen[0], chosen[1]
+
             print(f"  WARNING: Saved device '{AUDIO_DEVICE}' not found, falling back to default")
         elif isinstance(AUDIO_DEVICE, int):
             print(f"  NOTE: AUDIO_DEVICE is a legacy integer index ({AUDIO_DEVICE})")
@@ -63,8 +160,7 @@ def resolve_audio_device():
                 print(f"  WARNING: Legacy device index {AUDIO_DEVICE} unavailable, falling back")
 
     # Fall back to system default
-    default_idx = sd.default.device[0]
-    if default_idx is not None and default_idx >= 0:
+    if default_idx is not None:
         try:
             device_info = sd.query_devices(default_idx)
             if device_info['max_input_channels'] > 0:
@@ -73,8 +169,8 @@ def resolve_audio_device():
             pass
 
     # Last resort: first available input device
-    first_idx, first_dev = input_devices[0]
-    return first_idx, first_dev['name']
+    first_idx, first_name, _, _ = input_devices[0]
+    return first_idx, first_name
 
 
 def record_audio(duration, prompt, device_index):
@@ -128,8 +224,21 @@ def update_config(threshold):
 
     # Read existing config if it exists
     if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            content = f.read()
+        content = None
+        for encoding in ('utf-8', 'cp1252'):
+            try:
+                with open(config_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                if encoding != 'utf-8':
+                    print(f"WARNING: config.py decoded as {encoding}; rewriting as UTF-8")
+                break
+            except UnicodeDecodeError:
+                continue
+
+        if content is None:
+            with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            print("WARNING: config.py had invalid encoding; rewriting with replacement chars")
 
         # Check if NOISE_GATE_THRESHOLD already exists
         if 'NOISE_GATE_THRESHOLD' in content:
@@ -144,7 +253,7 @@ def update_config(threshold):
             # Append new setting
             content += f"\n# Noise gate threshold (auto-calibrated)\nNOISE_GATE_THRESHOLD = {threshold}\n"
 
-        with open(config_path, 'w') as f:
+        with open(config_path, 'w', encoding='utf-8') as f:
             f.write(content)
         print(f"\nUpdated {config_path}")
     else:

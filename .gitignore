@@ -19,3 +19,6 @@ src/config.py
 # IDE
 .vscode/
 .idea/
+
+# Local Claude tooling settings
+.claude/

@@ -246,8 +246,14 @@ echo Writing configuration...
     echo # Compute type: 'float16' for GPU, 'int8' for CPU
     echo COMPUTE_TYPE = '!COMPUTE_TYPE!'
     echo.
-    echo # Audio device index: None = system default
+    echo # Saved audio device identity ^(auto-managed^)
+    echo # AUDIO_DEVICE stores friendly name
+    echo # AUDIO_DEVICE_HOSTAPI and AUDIO_DEVICE_INDEX disambiguate duplicates
+    echo # AUDIO_DEVICE_UID stores derived stable fingerprint metadata
     echo AUDIO_DEVICE = None
+    echo AUDIO_DEVICE_HOSTAPI = None
+    echo AUDIO_DEVICE_INDEX = None
+    echo AUDIO_DEVICE_UID = None
     echo.
     echo # Noise reduction: True to filter background noise
     echo # Helps with fans, AC, ambient noise

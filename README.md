@@ -83,7 +83,16 @@ The installer is idempotent - safe to run multiple times to reconfigure.
    ```
    Double-click: start-dictation.bat
    ```
-   A colored circle appears in your system tray.
+   A startup healthcheck opens in the command window:
+   - Validates microphone stream health
+   - Prompts you to say **"check 1 2 3"**
+   - Verifies transcription before background launch
+   - Displays previous runtime state from `%LOCALAPPDATA%\VoiceDictation\state.json`
+   A colored circle then appears in your system tray.
+   
+   Optional launch modes:
+   - `start-dictation.bat --healthcheck-only` (run checks and exit)
+   - `start-dictation.bat --skip-healthcheck` (launch immediately)
 
 2. **Dictate:**
    - Hold your hotkey (default: Alt+F)
@@ -179,7 +188,10 @@ MODEL_SIZE = 'small'      # tiny, base, small, medium, large
 LANGUAGE = 'en'           # 'en', 'auto', 'es', 'fr', 'de', 'ja', etc.
 DEVICE = 'cuda'           # 'cuda' or 'cpu'
 COMPUTE_TYPE = 'float16'  # 'float16' for GPU, 'int8' for CPU
-AUDIO_DEVICE = None       # None = default, or device index
+AUDIO_DEVICE = None       # Saved device name (auto-managed)
+AUDIO_DEVICE_HOSTAPI = None  # Saved host API (auto-managed)
+AUDIO_DEVICE_INDEX = None    # Saved preferred index (auto-managed)
+AUDIO_DEVICE_UID = None      # Saved stable device fingerprint (auto-managed)
 NOISE_REDUCTION = False   # True to filter background noise
 USE_CLIPBOARD = True      # Copy text to clipboard as backup
 VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
@@ -206,6 +218,7 @@ This primes the model to recognize these spellings correctly. Just list the word
 | `install.bat` | Setup wizard (safe to re-run) |
 | `uninstall.bat` | Remove installation |
 | `start-dictation.bat` | Launch the tool |
+| `src/startup_healthcheck.py` | Operational preflight + spoken phrase verification |
 | `launch.cmd` | Headless launcher with logging |
 | `test-install.bat` | Verify installation |
 
