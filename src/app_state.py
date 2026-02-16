@@ -26,6 +26,8 @@ class DictationAppState:
 
     model: object | None = None
     tray_icon: object | None = None
+    tray_color: str | None = None
+    tray_title: str | None = None
 
     shutdown_event: Event = field(default_factory=Event)
     lock: RLock = field(default_factory=RLock)

@@ -57,3 +57,9 @@ def test_sanitize_transcript_text_removes_control_chars_and_normalizes_whitespac
 def test_sanitize_transcript_text_handles_empty_values():
     assert transcription_io.sanitize_transcript_text('') == ''
     assert transcription_io.sanitize_transcript_text(None) == ''
+
+
+def test_sanitize_transcript_text_ascii_fast_path_strips_controls():
+    raw = 'hello\x00 world\x7f\tok'
+    cleaned = transcription_io.sanitize_transcript_text(raw)
+    assert cleaned == 'hello world ok'

@@ -198,6 +198,7 @@ NOISE_REDUCTION = False   # True to filter background noise
 USE_CLIPBOARD = False     # Copy text to clipboard as backup (opt-in)
 LOG_TRANSCRIPT_TEXT = False  # Log transcript snippets (debug only)
 MAX_TYPED_CHARS = 1000    # Maximum characters typed per utterance
+LOG_LEVEL = 'INFO'        # Runtime log verbosity (DEBUG/INFO/WARNING/ERROR)
 VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
 ```
 

@@ -27,8 +27,13 @@ LOG_DIR = os.path.join(os.path.expanduser('~'), 'voice-dictation')
 LOG_FILE = os.path.join(LOG_DIR, 'dictation.log')
 os.makedirs(LOG_DIR, exist_ok=True)
 
+_DEFAULT_LOG_LEVEL_NAME = os.environ.get('VOICE_DICTATION_LOG_LEVEL', 'INFO').upper()
+_DEFAULT_LOG_LEVEL = getattr(logging, _DEFAULT_LOG_LEVEL_NAME, logging.INFO)
+if not isinstance(_DEFAULT_LOG_LEVEL, int):
+    _DEFAULT_LOG_LEVEL = logging.INFO
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=_DEFAULT_LOG_LEVEL,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding='utf-8'),
@@ -36,6 +41,24 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+def _apply_noisy_logger_policy(level):
+    """Keep chatty dependency loggers from overwhelming dictation logs."""
+    if level <= logging.DEBUG:
+        return
+    for logger_name in (
+        'httpx',
+        'httpcore',
+        'urllib3',
+        'filelock',
+        'faster_whisper',
+        'ctranslate2',
+    ):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+_apply_noisy_logger_policy(_DEFAULT_LOG_LEVEL)
 
 logger.info("=" * 50)
 logger.info("Voice Dictation starting...")
@@ -103,6 +126,7 @@ _instance_mutex_handle = None
 
 STATE = DictationAppState()
 stream_manager = None
+_TRAY_IMAGE_CACHE = {}
 
 # Lock to prevent concurrent device switches
 _switch_lock = threading.Lock()
@@ -450,6 +474,10 @@ def check_single_instance():
 
 def create_tray_image(color='green'):
     """Create a simple colored circle icon for the system tray."""
+    cached_image = _TRAY_IMAGE_CACHE.get(color)
+    if cached_image is not None:
+        return cached_image
+
     size = 64
     image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -466,15 +494,19 @@ def create_tray_image(color='green'):
     margin = 4
     draw.ellipse([margin, margin, size - margin, size - margin], fill=fill_color)
 
+    _TRAY_IMAGE_CACHE[color] = image
     return image
 
 
 def update_tray_icon(color, title=None):
     """Update the tray icon color and tooltip."""
     if STATE.tray_icon and TRAY_AVAILABLE:
-        STATE.tray_icon.icon = create_tray_image(color)
-        if title:
+        if color != STATE.tray_color:
+            STATE.tray_icon.icon = create_tray_image(color)
+            STATE.tray_color = color
+        if title and title != STATE.tray_title:
             STATE.tray_icon.title = title
+            STATE.tray_title = title
 
 
 def cleanup_resources():
@@ -602,10 +634,9 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
     """
     global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
 
-    with STATE.lock:
-        if STATE.is_recording or STATE.is_processing:
-            logger.warning("Cannot switch microphone while recording or processing")
-            return
+    if _is_audio_pipeline_busy():
+        logger.warning("Cannot switch microphone while recording or processing")
+        return
 
     if not _switch_lock.acquire(blocking=False):
         logger.warning("Device switch already in progress")
@@ -677,7 +708,7 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
 
         # Update tray to ready state (handles recovery from error state)
         if STATE.model is not None:
-            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+            _set_ready_icon()
 
         # Refresh tray menu checkmarks
         if STATE.tray_icon:
@@ -690,57 +721,49 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
 
 
 # Configuration - load from config.py if available
+_CONFIG = None
 try:
-    from config import HOTKEY, MODEL_SIZE, DEVICE, COMPUTE_TYPE, AUDIO_DEVICE, LANGUAGE
-    logger.info(f"Loaded config: HOTKEY={HOTKEY}, MODEL={MODEL_SIZE}, DEVICE={DEVICE}, LANGUAGE={LANGUAGE}")
+    import config as _CONFIG  # type: ignore
 except Exception as e:
     logger.warning(f"Failed to load config.py ({type(e).__name__}: {e}). Using defaults.")
-    HOTKEY = 'alt+f'
-    MODEL_SIZE = 'small'
-    DEVICE = 'cuda'
-    COMPUTE_TYPE = 'float16'
-    AUDIO_DEVICE = None
-    LANGUAGE = 'en'
 
-# Optional config: persisted audio identity helpers
-try:
-    from config import AUDIO_DEVICE_HOSTAPI
-except Exception:
-    AUDIO_DEVICE_HOSTAPI = None
 
-try:
-    from config import AUDIO_DEVICE_INDEX
-except Exception:
-    AUDIO_DEVICE_INDEX = None
+def _config_value(name, default):
+    """Read a value from config.py with safe fallback."""
+    if _CONFIG is None:
+        return default
+    return getattr(_CONFIG, name, default)
 
-try:
-    from config import AUDIO_DEVICE_UID
-except Exception:
-    AUDIO_DEVICE_UID = None
+
+HOTKEY = _config_value('HOTKEY', 'alt+f')
+MODEL_SIZE = _config_value('MODEL_SIZE', 'small')
+DEVICE = _config_value('DEVICE', 'cuda')
+COMPUTE_TYPE = _config_value('COMPUTE_TYPE', 'float16')
+AUDIO_DEVICE = _config_value('AUDIO_DEVICE', None)
+LANGUAGE = _config_value('LANGUAGE', 'en')
+AUDIO_DEVICE_HOSTAPI = _config_value('AUDIO_DEVICE_HOSTAPI', None)
+AUDIO_DEVICE_INDEX = _config_value('AUDIO_DEVICE_INDEX', None)
+AUDIO_DEVICE_UID = _config_value('AUDIO_DEVICE_UID', None)
+VOCABULARY = _config_value('VOCABULARY', '')
+NOISE_REDUCTION = _config_value('NOISE_REDUCTION', False)
+USE_CLIPBOARD = _config_value('USE_CLIPBOARD', False)
+LOG_TRANSCRIPT_TEXT = _config_value('LOG_TRANSCRIPT_TEXT', False)
+LOG_LEVEL = _config_value('LOG_LEVEL', None)
+MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
+NOISE_GATE_THRESHOLD = _config_value('NOISE_GATE_THRESHOLD', 0.01)
+
+if _CONFIG is not None:
+    logger.info(f"Loaded config: HOTKEY={HOTKEY}, MODEL={MODEL_SIZE}, DEVICE={DEVICE}, LANGUAGE={LANGUAGE}")
 
 if isinstance(AUDIO_DEVICE_INDEX, str):
     stripped = AUDIO_DEVICE_INDEX.strip()
-    if stripped.isdigit():
-        AUDIO_DEVICE_INDEX = int(stripped)
-    else:
-        AUDIO_DEVICE_INDEX = None
+    AUDIO_DEVICE_INDEX = int(stripped) if stripped.isdigit() else None
 
 if isinstance(AUDIO_DEVICE_UID, str):
     AUDIO_DEVICE_UID = AUDIO_DEVICE_UID.strip() or None
 
-# Optional config: custom vocabulary for better recognition
-try:
-    from config import VOCABULARY
-    if VOCABULARY:
-        logger.info(f"Custom vocabulary: {VOCABULARY}")
-except Exception:
-    VOCABULARY = ''
-
-# Optional config: noise reduction (default off)
-try:
-    from config import NOISE_REDUCTION
-except Exception:
-    NOISE_REDUCTION = False
+if VOCABULARY:
+    logger.info(f"Custom vocabulary: {VOCABULARY}")
 
 if NOISE_REDUCTION and not NOISEREDUCE_AVAILABLE:
     logger.warning("NOISE_REDUCTION enabled but noisereduce not installed. Disabling.")
@@ -748,40 +771,25 @@ if NOISE_REDUCTION and not NOISEREDUCE_AVAILABLE:
 elif NOISE_REDUCTION:
     logger.info("Noise reduction enabled")
 
-# Optional config: clipboard copy (default off)
-try:
-    from config import USE_CLIPBOARD
-except Exception:
-    USE_CLIPBOARD = False
-
 if USE_CLIPBOARD:
     logger.info("Clipboard copy enabled")
-
-# Optional config: transcript text logging (default off for privacy)
-try:
-    from config import LOG_TRANSCRIPT_TEXT
-except Exception:
-    LOG_TRANSCRIPT_TEXT = False
 
 if LOG_TRANSCRIPT_TEXT:
     logger.warning("Transcript text logging is enabled; this may capture sensitive data in logs")
 
-# Optional config: hard cap on typed characters per utterance
-try:
-    from config import MAX_TYPED_CHARS
-except Exception:
-    MAX_TYPED_CHARS = 1000
+if LOG_LEVEL:
+    configured_level = getattr(logging, str(LOG_LEVEL).upper(), None)
+    if isinstance(configured_level, int):
+        logging.getLogger().setLevel(configured_level)
+        _apply_noisy_logger_policy(configured_level)
+        logger.info(f"Log level set from config: {str(LOG_LEVEL).upper()}")
+    else:
+        logger.warning(f"Ignoring invalid LOG_LEVEL value: {LOG_LEVEL!r}")
 
 if not isinstance(MAX_TYPED_CHARS, int):
     MAX_TYPED_CHARS = 1000
 if MAX_TYPED_CHARS < 1:
     MAX_TYPED_CHARS = 1
-
-# Optional config: noise gate threshold (minimum RMS level to process audio)
-try:
-    from config import NOISE_GATE_THRESHOLD
-except Exception:
-    NOISE_GATE_THRESHOLD = 0.01
 
 if NOISE_GATE_THRESHOLD > 0:
     logger.info(f"Noise gate enabled (threshold={NOISE_GATE_THRESHOLD})")
@@ -793,10 +801,60 @@ SAMPLE_RATE = 16000
 
 MAX_RECORDING_SECONDS = 120
 RECORDING_MONITOR_INTERVAL = 0.05
+IDLE_RECORDING_MONITOR_INTERVAL = 0.20
 HOTKEY_PARTS = [part.strip() for part in HOTKEY.split('+') if part.strip()]
+SILENCE_RMS_THRESHOLD = 1e-6
+SILENCE_POWER_THRESHOLD = SILENCE_RMS_THRESHOLD * SILENCE_RMS_THRESHOLD
+
+READY_TITLE = f'Voice Dictation - Ready [{HOTKEY.upper()}]'
+RECORDING_TITLE = 'Voice Dictation - Recording...'
+PROCESSING_TITLE = 'Voice Dictation - Processing...'
+RECORDING_MUTED_WARNING_TITLE = 'Recording - Warning: mic may be muted'
+READY_MUTED_WARNING_TITLE = f'{READY_TITLE} (Warning: mic may be muted)'
+
+MODIFIER_KEYS = (
+    'alt', 'left alt', 'right alt',
+    'ctrl', 'left ctrl', 'right ctrl',
+    'shift', 'left shift', 'right shift',
+    'windows', 'left windows', 'right windows',
+)
 
 if not HOTKEY_PARTS:
     logger.warning(f"HOTKEY '{HOTKEY}' could not be parsed into keys")
+
+
+def _set_ready_icon(title=None):
+    """Set tray icon to ready (green)."""
+    update_tray_icon('green', title or READY_TITLE)
+
+
+def _set_recording_icon(title=None):
+    """Set tray icon to recording (red)."""
+    update_tray_icon('red', title or RECORDING_TITLE)
+
+
+def _set_processing_icon(title=None):
+    """Set tray icon to processing (yellow)."""
+    update_tray_icon('yellow', title or PROCESSING_TITLE)
+
+
+def _finish_processing_cycle():
+    """Reset processing state and return tray icon to ready."""
+    with STATE.lock:
+        STATE.is_processing = False
+    _set_ready_icon()
+
+
+def _recording_snapshot():
+    """Return a lock-consistent snapshot of recording state."""
+    with STATE.lock:
+        return STATE.is_recording, STATE.recording_start_time, STATE.silence_flag
+
+
+def _is_audio_pipeline_busy():
+    """Return True while recording or transcribing a captured utterance."""
+    with STATE.lock:
+        return STATE.is_recording or STATE.is_processing
 
 
 def load_model():
@@ -818,10 +876,9 @@ def audio_callback(indata, frames, time_info, status):
         return
 
     frame = indata.copy()
-    # Lightweight silence detection: check if this block is near-silent
-    # and set a flag for the monitor thread to act on (avoid heavy work in callback)
-    rms = np.sqrt(np.mean(frame ** 2))
-    is_silent = bool(rms < 1e-6)
+    # Lightweight silence detection: compare mean-square value to avoid sqrt in hot path.
+    power = float(np.mean(frame * frame))
+    is_silent = power < SILENCE_POWER_THRESHOLD
 
     with STATE.lock:
         if STATE.is_recording:
@@ -841,124 +898,126 @@ def start_recording():
         STATE.silence_flag = False
         STATE.recording_start_time = time.time()
         STATE.is_recording = True
-    update_tray_icon('red', 'Voice Dictation - Recording...')
+    _set_recording_icon()
     logger.info("Recording started")
     return True
 
 
-def stop_recording_and_transcribe():
-    """Stop recording, transcribe, and type the result."""
+def _begin_processing_from_recording():
+    """Transition recording -> processing and return captured frames."""
     with STATE.lock:
         if not STATE.is_recording:
-            return
+            return None
         STATE.is_recording = False
         if STATE.is_processing:
             logger.debug("stop_recording ignored: transcription already in progress")
-            return
+            return None
         STATE.is_processing = True
-        recorded_frames = list(STATE.recorded_frames)
+        recorded_frames = STATE.recorded_frames
         STATE.recorded_frames = []
+    return recorded_frames
 
+
+def _prepare_audio_for_transcription(recorded_frames):
+    """Validate and normalize captured frames for transcription."""
     if not recorded_frames:
         logger.info("No audio captured")
-        update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
-        with STATE.lock:
-            STATE.is_processing = False
-        return
-
-    update_tray_icon('yellow', 'Voice Dictation - Processing...')
-    logger.info("Processing audio...")
+        return None
 
     # Combine recorded audio with corruption guard
     try:
         audio_data = np.concatenate(recorded_frames, axis=0)
     except (ValueError, TypeError) as e:
         logger.error(f"Failed to concatenate audio frames (corrupt data?): {e}")
-        update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
-        with STATE.lock:
-            STATE.is_processing = False
-        return
+        return None
 
     # Check minimum duration (< 0.1s is too short to transcribe)
     duration_s = len(audio_data) / SAMPLE_RATE
     if duration_s < 0.1:
         logger.info(f"Audio too short ({duration_s:.3f}s < 0.1s), skipping transcription")
-        update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
-        with STATE.lock:
-            STATE.is_processing = False
-        return
+        return None
 
     # Check noise gate threshold
     if NOISE_GATE_THRESHOLD > 0:
-        rms = np.sqrt(np.mean(audio_data ** 2))
-        if rms < NOISE_GATE_THRESHOLD:
+        power = float(np.mean(audio_data * audio_data))
+        if power < (NOISE_GATE_THRESHOLD * NOISE_GATE_THRESHOLD):
+            rms = power ** 0.5
             logger.info(f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}), skipping")
-            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
-            with STATE.lock:
-                STATE.is_processing = False
-            return
+            return None
 
     # Apply noise reduction if enabled
     if NOISE_REDUCTION:
         logger.debug("Applying noise reduction...")
-        # Flatten to 1D for noisereduce, then reshape back
-        audio_flat = audio_data.flatten()
-        audio_flat = nr.reduce_noise(y=audio_flat, sr=SAMPLE_RATE)
-        audio_data = audio_flat.reshape(-1, 1)
+        # Use ravel() to avoid unnecessary copy when data is already contiguous.
+        audio_data = nr.reduce_noise(y=np.ravel(audio_data), sr=SAMPLE_RATE)
+    return audio_data
+
+
+def _transcribe_and_emit_text(audio_data):
+    """Run Whisper transcription then emit text to clipboard/active window."""
+    start_time = time.time()
+    transcribe_opts = {
+        'beam_size': 5,
+        'language': TRANSCRIBE_LANGUAGE,
+    }
+    if VOCABULARY:
+        transcribe_opts['initial_prompt'] = VOCABULARY
+    raw_text = transcription_io.transcribe_audio_array(
+        STATE.model,
+        audio_data,
+        SAMPLE_RATE,
+        sf_module=sf,
+        **transcribe_opts,
+    )
+    text = transcription_io.sanitize_transcript_text(raw_text)
+    if len(text) > MAX_TYPED_CHARS:
+        logger.warning(
+            f"Transcript length {len(text)} exceeds MAX_TYPED_CHARS={MAX_TYPED_CHARS}; truncating output"
+        )
+        text = text[:MAX_TYPED_CHARS].rstrip()
+    elapsed = time.time() - start_time
+
+    if not text:
+        logger.info("No speech detected")
+        return
+
+    if raw_text != text:
+        logger.info("Transcript normalized before output")
+    if LOG_TRANSCRIPT_TEXT:
+        logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
+    else:
+        logger.info(f"Transcribed ({elapsed:.1f}s), {len(text)} chars")
+
+    # Copy to clipboard if enabled
+    if USE_CLIPBOARD:
+        pyperclip.copy(text)
+
+    # Type the text into active window
+    # Small delay to ensure window focus
+    time.sleep(0.05)
+    _release_modifier_keys()
+    # Add delay between keystrokes to prevent Claude Code crash
+    # (Known bug: rapid text injection causes TUI crash)
+    keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
+
+
+def stop_recording_and_transcribe():
+    """Stop recording, transcribe captured audio, and inject resulting text."""
+    recorded_frames = _begin_processing_from_recording()
+    if recorded_frames is None:
+        return
 
     try:
-        # Transcribe with custom vocabulary as initial prompt
-        start_time = time.time()
-        transcribe_opts = {
-            'beam_size': 5,
-            'language': TRANSCRIBE_LANGUAGE,
-        }
-        if VOCABULARY:
-            transcribe_opts['initial_prompt'] = VOCABULARY
-        raw_text = transcription_io.transcribe_audio_array(
-            STATE.model,
-            audio_data,
-            SAMPLE_RATE,
-            sf_module=sf,
-            **transcribe_opts,
-        )
-        text = transcription_io.sanitize_transcript_text(raw_text)
-        if len(text) > MAX_TYPED_CHARS:
-            logger.warning(
-                f"Transcript length {len(text)} exceeds MAX_TYPED_CHARS={MAX_TYPED_CHARS}; truncating output"
-            )
-            text = text[:MAX_TYPED_CHARS].rstrip()
-        elapsed = time.time() - start_time
-
-        if text:
-            if raw_text != text:
-                logger.info("Transcript normalized before output")
-            if LOG_TRANSCRIPT_TEXT:
-                logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
-            else:
-                logger.info(f"Transcribed ({elapsed:.1f}s), {len(text)} chars")
-
-            # Copy to clipboard if enabled
-            if USE_CLIPBOARD:
-                pyperclip.copy(text)
-
-            # Type the text into active window
-            # Small delay to ensure window focus
-            time.sleep(0.05)
-            _release_modifier_keys()
-            # Add delay between keystrokes to prevent Claude Code crash
-            # (Known bug: rapid text injection causes TUI crash)
-            keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
-        else:
-            logger.info("No speech detected")
-
+        _set_processing_icon()
+        logger.info("Processing audio...")
+        audio_data = _prepare_audio_for_transcription(recorded_frames)
+        if audio_data is None:
+            return
+        _transcribe_and_emit_text(audio_data)
     except Exception as e:
         logger.error(f"Transcription error: {e}")
     finally:
-        with STATE.lock:
-            STATE.is_processing = False
-        # Reset tray icon to ready state
-        update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+        _finish_processing_cycle()
 
 
 def on_hotkey_press():
@@ -968,8 +1027,7 @@ def on_hotkey_press():
 
 def on_hotkey_release():
     """Called when hotkey is released."""
-    with STATE.lock:
-        is_recording = STATE.is_recording
+    is_recording, _, _ = _recording_snapshot()
     if is_recording:
         stop_recording_and_transcribe()
 
@@ -987,13 +1045,7 @@ def _is_hotkey_currently_pressed():
 
 def _release_modifier_keys():
     """Best-effort release of modifier keys before synthetic typing."""
-    modifier_keys = (
-        'alt', 'left alt', 'right alt',
-        'ctrl', 'left ctrl', 'right ctrl',
-        'shift', 'left shift', 'right shift',
-        'windows', 'left windows', 'right windows',
-    )
-    for key in modifier_keys:
+    for key in MODIFIER_KEYS:
         try:
             keyboard.release(key)
         except Exception:
@@ -1081,10 +1133,7 @@ def _recording_state_watchdog():
     """Monitor timeout/silence and fallback key-release detection while recording."""
     silence_warned = False
     while not STATE.shutdown_event.is_set():
-        with STATE.lock:
-            is_recording = STATE.is_recording
-            recording_start_time = STATE.recording_start_time
-            silence_flag = STATE.silence_flag
+        is_recording, recording_start_time, silence_flag = _recording_snapshot()
 
         if is_recording and recording_start_time > 0:
             if not _is_hotkey_currently_pressed():
@@ -1104,14 +1153,15 @@ def _recording_state_watchdog():
 
             if silence_flag and not silence_warned:
                 silence_warned = True
-                update_tray_icon('red', 'Recording - Warning: mic may be muted')
+                _set_recording_icon(RECORDING_MUTED_WARNING_TITLE)
             elif not silence_flag and silence_warned:
                 silence_warned = False
-                update_tray_icon('red', 'Voice Dictation - Recording...')
+                _set_recording_icon()
         else:
             silence_warned = False
 
-        STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
+        wait_seconds = RECORDING_MONITOR_INTERVAL if is_recording else IDLE_RECORDING_MONITOR_INTERVAL
+        STATE.shutdown_event.wait(wait_seconds)
 
 
 def test_microphone():
@@ -1154,7 +1204,7 @@ def test_microphone():
 
     if rms < 1e-6:
         logger.warning(f"Microphone self-test: RMS={rms:.8f} - mic may be muted or disconnected")
-        update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}] (Warning: mic may be muted)')
+        _set_ready_icon(READY_MUTED_WARNING_TITLE)
     else:
         logger.info(f"Microphone self-test passed (RMS={rms:.6f})")
 
@@ -1177,7 +1227,7 @@ def _reopen_audio_stream(recovery_reason):
             f"Audio stream recovered successfully ({recovery_reason}) on open_arg={device_to_open}"
         )
         if STATE.model is not None:
-            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+            _set_ready_icon()
         _write_runtime_state('ready', reason=f'recovered:{recovery_reason}')
         return True
     except Exception as e:
@@ -1204,10 +1254,7 @@ def stream_health_watchdog():
             break
 
         # Don't interfere while actively recording.
-        with STATE.lock:
-            is_recording = STATE.is_recording
-            is_processing = STATE.is_processing
-        if is_recording or is_processing:
+        if _is_audio_pipeline_busy():
             continue
 
         # Detect device topology changes (dock/undock, device add/remove).
@@ -1308,7 +1355,7 @@ def init_audio_and_dictation():
             STATE.audio_stream = manager.stream
             STATE.last_callback_time = time.time()
             logger.info("Audio stream started")
-            update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
+            _set_ready_icon()
             _write_runtime_state('ready', reason='startup_complete')
 
             # Run non-blocking mic test after stream is confirmed working
@@ -1359,6 +1406,8 @@ def main():
                 'Voice Dictation - Starting...',
                 menu
             )
+            STATE.tray_color = 'gray'
+            STATE.tray_title = 'Voice Dictation - Starting...'
 
             # Run mic check, model load, and dictation in background thread
             init_thread = threading.Thread(target=init_audio_and_dictation, daemon=True)

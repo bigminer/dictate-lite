@@ -54,6 +54,10 @@ LOG_TRANSCRIPT_TEXT = False
 # Prevents accidental multi-thousand-character injections if transcription goes wrong.
 MAX_TYPED_CHARS = 1000
 
+# Log level for runtime diagnostics: DEBUG, INFO, WARNING, ERROR
+# INFO is recommended for normal usage and better performance.
+LOG_LEVEL = 'INFO'
+
 # Custom vocabulary: words/names the model should recognize correctly
 # Comma-separated list of terms (names, technical words, acronyms)
 # The model will be primed to recognize these spellings

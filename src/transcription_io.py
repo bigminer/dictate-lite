@@ -47,7 +47,17 @@ def sanitize_transcript_text(text):
     if not text:
         return ''
 
-    normalized = unicodedata.normalize('NFKC', str(text))
+    raw = text if isinstance(text, str) else str(text)
+
+    # Fast path for the common ASCII-only case.
+    if raw.isascii():
+        cleaned_ascii = ''.join(
+            ' ' if (ord(char) < 32 or ord(char) == 127) else char
+            for char in raw
+        )
+        return _WHITESPACE_RE.sub(' ', cleaned_ascii).strip()
+
+    normalized = unicodedata.normalize('NFKC', raw)
     cleaned = ''.join(
         ' ' if unicodedata.category(char).startswith('C') else char
         for char in normalized

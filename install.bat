@@ -268,6 +268,9 @@ echo Writing configuration...
     echo.
     echo # Hard cap on typed characters per utterance
     echo MAX_TYPED_CHARS = 1000
+    echo.
+    echo # Log level: DEBUG, INFO, WARNING, ERROR
+    echo LOG_LEVEL = 'INFO'
 ) > src\config.py
 
 :: Check if model changed and needs download
