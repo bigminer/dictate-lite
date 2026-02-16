@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -146,3 +147,110 @@ def test_watchdog_release_fallback_triggers_stop_once():
     module._recording_state_watchdog()
 
     stop_mock.assert_called_once()
+
+
+def test_concurrent_release_watchdog_and_callback_paths_single_flight_transcription():
+    module, mocked = _import_dictate_module()
+    _prime_recording_state(module, samples=3200, amplitude=0.2)
+    module.STATE.model = MagicMock()
+    module.RECORDING_MONITOR_INTERVAL = 0.001
+    module.STATE.shutdown_event.clear()
+    module._is_hotkey_currently_pressed = MagicMock(return_value=False)
+    errors = []
+
+    with patch.object(module.transcription_io, 'transcribe_audio_array', return_value='race test') as transcribe_mock:
+        def watchdog_runner():
+            try:
+                module._recording_state_watchdog()
+            except Exception as exc:
+                errors.append(exc)
+
+        def callback_spammer():
+            frame = np.ones((16, 1), dtype=np.float32) * 0.25
+            for _ in range(100):
+                try:
+                    module.audio_callback(frame, 16, None, None)
+                except Exception as exc:
+                    errors.append(exc)
+                time.sleep(0.0005)
+
+        watch_thread = threading.Thread(target=watchdog_runner)
+        callback_thread = threading.Thread(target=callback_spammer)
+        watch_thread.start()
+        callback_thread.start()
+        time.sleep(0.01)
+        module.on_hotkey_release()
+        time.sleep(0.02)
+        module.STATE.shutdown_event.set()
+        watch_thread.join(timeout=1)
+        callback_thread.join(timeout=1)
+
+    assert errors == []
+    assert transcribe_mock.call_count == 1
+    assert mocked['keyboard'].write.call_count == 1
+    assert module.STATE.is_processing is False
+
+
+def test_processing_flag_clears_on_concatenate_failure():
+    module, _ = _import_dictate_module()
+    with module.STATE.lock:
+        module.STATE.is_recording = True
+        module.STATE.is_processing = False
+        module.STATE.recording_start_time = time.time() - 1
+        module.STATE.recorded_frames = [np.zeros((10, 1), dtype=np.float32), np.zeros((10,), dtype=np.float32)]
+
+    module.stop_recording_and_transcribe()
+
+    assert module.STATE.is_processing is False
+    assert module.STATE.is_recording is False
+
+
+def test_processing_flag_clears_on_short_audio_return():
+    module, _ = _import_dictate_module()
+    _prime_recording_state(module, samples=200, amplitude=0.2)
+
+    module.stop_recording_and_transcribe()
+
+    assert module.STATE.is_processing is False
+    assert module.STATE.is_recording is False
+
+
+def test_processing_flag_clears_on_noise_gate_quiet_return():
+    module, _ = _import_dictate_module({'NOISE_GATE_THRESHOLD': 0.5})
+    _prime_recording_state(module, samples=3200, amplitude=0.01)
+
+    module.stop_recording_and_transcribe()
+
+    assert module.STATE.is_processing is False
+    assert module.STATE.is_recording is False
+
+
+def test_processing_flag_clears_on_transcription_exception():
+    module, _ = _import_dictate_module()
+    _prime_recording_state(module, samples=3200, amplitude=0.2)
+    module.STATE.model = MagicMock()
+
+    with patch.object(module.transcription_io, 'transcribe_audio_array', side_effect=RuntimeError('boom')):
+        module.stop_recording_and_transcribe()
+
+    assert module.STATE.is_processing is False
+    assert module.STATE.is_recording is False
+
+
+def test_switch_and_reopen_paths_obey_shared_lock_contention():
+    module, _ = _import_dictate_module()
+    manager = MagicMock()
+    module._get_stream_manager = MagicMock(return_value=manager)
+    with module.STATE.lock:
+        module.STATE.is_recording = False
+        module.STATE.is_processing = False
+    module._switch_lock.acquire()
+    try:
+        reopened = module._reopen_audio_stream('test-contention')
+        module.switch_audio_device(1, 'Mic')
+    finally:
+        module._switch_lock.release()
+
+    assert reopened is False
+    manager.reopen.assert_not_called()
+    manager.switch.assert_not_called()
