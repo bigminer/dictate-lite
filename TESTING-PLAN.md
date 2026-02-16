@@ -18,7 +18,7 @@ steps or just skim them as a sanity check.
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-> 70 tests | ~1.0 seconds | No microphone or GPU needed
+> 80 tests | ~1.0 seconds | No microphone or GPU needed
 
 <br>
 
@@ -454,7 +454,7 @@ Keep these open while testing:
 .venv\Scripts\python -m pytest tests/ -v
 ```
 
-**70 tests across 15 test classes plus 2 module-level suites:**
+**80 tests across 15 test classes plus 7 module-level suites:**
 
 | Group | File | Test Class | Count |
 |:-----:|------|------------|:-----:|
@@ -475,6 +475,11 @@ Keep these open while testing:
 | -- | `test_dictate.py` | `TestAudioDeviceStringCompatibility` | 2 |
 | D | `test_audio_device_identity.py` | *(module-level tests)* | 5 |
 | D | `test_runtime_state.py` | *(module-level tests)* | 4 |
+| D | `test_config_store.py` | *(module-level tests)* | 3 |
+| D | `test_audio_stream_manager.py` | *(module-level tests)* | 3 |
+| D | `test_audio_capture.py` | *(module-level tests)* | 2 |
+| D | `test_transcription_io.py` | *(module-level tests)* | 1 |
+| D | `test_app_state.py` | *(module-level tests)* | 1 |
 
 <br>
 

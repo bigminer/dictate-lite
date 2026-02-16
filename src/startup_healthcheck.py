@@ -11,7 +11,6 @@ Runs an operational readiness check in the startup command window:
 import os
 import re
 import sys
-import tempfile
 import time
 import argparse
 
@@ -20,7 +19,9 @@ import sounddevice as sd
 import soundfile as sf
 
 import audio_device_identity as audio_identity
+import audio_capture
 import runtime_state
+import transcription_io
 
 
 TARGET_PROMPT = 'check 1 2 3'
@@ -101,45 +102,28 @@ def resolve_device(cfg, input_devices):
 
 def stream_probe(device_index):
     """Open/close an input stream to verify microphone availability."""
-    stream = sd.InputStream(
-        samplerate=SAMPLE_RATE,
+    audio_capture.probe_input_stream(
+        sd,
+        device_index=device_index,
+        sample_rate=SAMPLE_RATE,
         channels=1,
         dtype='float32',
         blocksize=1024,
-        device=device_index
     )
-    stream.start()
-    stream.stop()
-    stream.close()
 
 
 def record_phrase(device_index):
     """Record audio sample for phrase verification."""
     print(f'[INFO] Recording for {RECORD_SECONDS:.1f}s...')
-    total_frames = int(RECORD_SECONDS * SAMPLE_RATE)
-    blocksize = 1024
-    chunks = []
-    remaining = total_frames
-
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
+    return audio_capture.capture_from_stream(
+        sd,
+        device_index=device_index,
+        seconds=RECORD_SECONDS,
+        sample_rate=SAMPLE_RATE,
         channels=1,
         dtype='float32',
-        blocksize=blocksize,
-        device=device_index
-    ) as stream:
-        while remaining > 0:
-            to_read = min(blocksize, remaining)
-            data, overflowed = stream.read(to_read)
-            if overflowed:
-                print('[WARN] Input overflow detected during healthcheck recording.')
-            chunks.append(np.array(data, copy=True))
-            remaining -= len(data)
-
-    if not chunks:
-        return np.array([], dtype=np.float32)
-
-    return np.concatenate(chunks, axis=0).flatten()
+        blocksize=1024,
+    )
 
 
 def normalize_text(text):
@@ -161,36 +145,38 @@ def phrase_matched(text):
 
 def transcribe_audio(cfg, audio):
     """Transcribe recorded audio with runtime model settings and safe fallback."""
-    from faster_whisper import WhisperModel
-
     model_size = cfg['MODEL_SIZE'] or 'small'
     device = cfg['DEVICE'] or 'cpu'
     compute_type = cfg['COMPUTE_TYPE'] or ('float16' if device == 'cuda' else 'int8')
     language = None if cfg['LANGUAGE'] == 'auto' else cfg['LANGUAGE']
 
-    model = None
-    try:
-        print(f"[INFO] Loading model '{model_size}' on {device}...")
-        model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    except Exception as e:
-        print(f"[WARN] Model load failed ({type(e).__name__}: {e})")
-        print("[WARN] Falling back to tiny model on CPU for healthcheck...")
-        model = WhisperModel('tiny', device='cpu', compute_type='int8')
+    class _ConsoleLogger:
+        @staticmethod
+        def info(msg):
+            print(f'[INFO] {msg}')
+
+        @staticmethod
+        def warning(msg):
+            print(f'[WARN] {msg}')
+
+    model, used_fallback = transcription_io.load_whisper_model(
+        model_size=model_size,
+        device=device,
+        compute_type=compute_type,
+        fallback_model='tiny',
+        logger=_ConsoleLogger,
+    )
+    if used_fallback:
         language = None
 
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-            temp_path = f.name
-        sf.write(temp_path, audio, SAMPLE_RATE)
-        segments, _ = model.transcribe(temp_path, beam_size=3, language=language)
-        return ' '.join(seg.text for seg in segments).strip()
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+    return transcription_io.transcribe_audio_array(
+        model,
+        audio,
+        SAMPLE_RATE,
+        sf_module=sf,
+        beam_size=3,
+        language=language,
+    )
 
 
 def run_healthcheck():

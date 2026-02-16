@@ -8,6 +8,7 @@ import os
 import time
 import numpy as np
 import audio_device_identity as audio_identity
+import config_store
 
 # Add src directory to path for config import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -123,45 +124,27 @@ def update_config(threshold):
     """Update or create config.py with new threshold."""
     config_path = os.path.join(os.path.dirname(__file__), 'config.py')
 
-    # Read existing config if it exists
-    if os.path.exists(config_path):
-        content = None
-        for encoding in ('utf-8', 'cp1252'):
-            try:
-                with open(config_path, 'r', encoding=encoding) as f:
-                    content = f.read()
-                if encoding != 'utf-8':
-                    print(f"WARNING: config.py decoded as {encoding}; rewriting as UTF-8")
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if content is None:
-            with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = f.read()
-            print("WARNING: config.py had invalid encoding; rewriting with replacement chars")
-
-        # Check if NOISE_GATE_THRESHOLD already exists
-        if 'NOISE_GATE_THRESHOLD' in content:
-            # Replace existing value
-            import re
-            content = re.sub(
-                r'NOISE_GATE_THRESHOLD\s*=\s*[\d.]+',
-                f'NOISE_GATE_THRESHOLD = {threshold}',
-                content
-            )
-        else:
-            # Append new setting
-            content += f"\n# Noise gate threshold (auto-calibrated)\nNOISE_GATE_THRESHOLD = {threshold}\n"
-
-        with open(config_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        print(f"\nUpdated {config_path}")
-    else:
+    if not os.path.exists(config_path):
         print(f"\nERROR: config.py not found at {config_path}")
         print("Please run install.bat first or create config.py manually.")
         return False
 
+    class _PrintLogger:
+        @staticmethod
+        def warning(msg):
+            print(f"WARNING: {msg}")
+
+    ok = config_store.update_config_values(
+        config_path=config_path,
+        updates={'NOISE_GATE_THRESHOLD': threshold},
+        comments={'NOISE_GATE_THRESHOLD': '# Noise gate threshold (auto-calibrated)'},
+        logger=_PrintLogger,
+    )
+    if not ok:
+        print(f"\nERROR: Failed to update {config_path}")
+        return False
+
+    print(f"\nUpdated {config_path}")
     return True
 
 

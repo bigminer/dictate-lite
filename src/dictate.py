@@ -6,7 +6,6 @@ Uses faster-whisper with GPU acceleration.
 
 import sys
 import threading
-import queue
 import tempfile
 import os
 import time
@@ -16,7 +15,12 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 import audio_device_identity as audio_identity
+import audio_capture
+import config_store
 import runtime_state
+import transcription_io
+from app_state import DictationAppState
+from audio_stream_manager import AudioStreamManager
 
 # Set up logging FIRST before any other imports that might fail
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'voice-dictation')
@@ -97,20 +101,8 @@ LOCK_FILE = os.path.join(tempfile.gettempdir(), 'voice-dictation.lock')
 MUTEX_NAME = r'Local\VoiceDictationSingleton'
 _instance_mutex_handle = None
 
-# Active microphone name (set by check_microphone)
-active_mic_name = None
-
-# Active microphone index (used for opening streams to avoid name ambiguity)
-active_mic_index = None
-
-# Active microphone host API name (MME, WASAPI, DirectSound, etc.)
-active_mic_hostapi = None
-
-# Active audio stream (managed manually for hot-swap device switching)
-audio_stream = None
-
-# Last observed input-device topology signature (for hotplug detection)
-last_device_topology_signature = None
+STATE = DictationAppState()
+stream_manager = None
 
 # Lock to prevent concurrent device switches
 _switch_lock = threading.Lock()
@@ -179,6 +171,22 @@ def _resolve_device_uid_to_index(device_uid, input_devices, default_index=None):
     )
 
 
+def _get_stream_manager():
+    """Lazily create the shared audio stream manager."""
+    global stream_manager
+    if stream_manager is None:
+        stream_manager = AudioStreamManager(
+            sd,
+            callback=audio_callback,
+            sample_rate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            blocksize=1024,
+            logger=logger,
+        )
+    return stream_manager
+
+
 def check_microphone():
     """Check microphone with fallback: saved device -> system default -> first available.
     Returns True if a usable mic was found, False otherwise.
@@ -189,12 +197,10 @@ def check_microphone():
       - str:  device name to resolve (current format)
       - int:  legacy device index (deprecated, will be migrated to name)
     """
-    global active_mic_name, active_mic_index, active_mic_hostapi
     global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
-    global last_device_topology_signature
-    active_mic_name = None
-    active_mic_index = None
-    active_mic_hostapi = None
+    STATE.active_mic_name = None
+    STATE.active_mic_index = None
+    STATE.active_mic_hostapi = None
     try:
         input_devices = _enumerate_input_devices()
         if not input_devices:
@@ -205,7 +211,7 @@ def check_microphone():
         for idx, name, hostapi_name, _, device_uid in input_devices:
             logger.debug(f"  [{idx}] {name} ({hostapi_name})")
             logger.debug(f"    uid={device_uid}")
-        last_device_topology_signature = _current_input_topology_signature(input_devices)
+        STATE.last_device_topology_signature = _current_input_topology_signature(input_devices)
 
         prior_name = AUDIO_DEVICE
         prior_hostapi = AUDIO_DEVICE_HOSTAPI
@@ -229,9 +235,9 @@ def check_microphone():
             AUDIO_DEVICE_UID = None
             return False
 
-        active_mic_name = resolved_name
-        active_mic_index = resolved_idx
-        active_mic_hostapi = resolved_hostapi
+        STATE.active_mic_name = resolved_name
+        STATE.active_mic_index = resolved_idx
+        STATE.active_mic_hostapi = resolved_hostapi
         AUDIO_DEVICE = resolved_name
         AUDIO_DEVICE_HOSTAPI = resolved_hostapi
         AUDIO_DEVICE_INDEX = resolved_idx
@@ -251,7 +257,7 @@ def check_microphone():
             )
 
         logger.info(
-            f"Using resolved microphone: [{resolved_idx}] {active_mic_name} ({resolved_hostapi}) uid={resolved_uid}"
+            f"Using resolved microphone: [{resolved_idx}] {STATE.active_mic_name} ({resolved_hostapi}) uid={resolved_uid}"
         )
         return True
 
@@ -267,8 +273,8 @@ def get_input_devices():
 
 def _get_active_stream_device():
     """Return the best device identifier for opening streams (prefer numeric index)."""
-    if active_mic_index is not None:
-        return active_mic_index
+    if STATE.active_mic_index is not None:
+        return STATE.active_mic_index
     if isinstance(AUDIO_DEVICE_INDEX, int):
         return AUDIO_DEVICE_INDEX
     return AUDIO_DEVICE
@@ -442,13 +448,6 @@ def check_single_instance():
     atexit.register(cleanup_lock)
 
 
-# Lazy load the model to show startup message first
-model = None
-
-# Global tray icon reference
-tray_icon = None
-
-
 def create_tray_image(color='green'):
     """Create a simple colored circle icon for the system tray."""
     size = 64
@@ -472,11 +471,10 @@ def create_tray_image(color='green'):
 
 def update_tray_icon(color, title=None):
     """Update the tray icon color and tooltip."""
-    global tray_icon
-    if tray_icon and TRAY_AVAILABLE:
-        tray_icon.icon = create_tray_image(color)
+    if STATE.tray_icon and TRAY_AVAILABLE:
+        STATE.tray_icon.icon = create_tray_image(color)
         if title:
-            tray_icon.title = title
+            STATE.tray_icon.title = title
 
 
 def cleanup_resources():
@@ -486,12 +484,14 @@ def cleanup_resources():
     """
     logger.info("cleanup_resources() called - shutting down gracefully")
 
+    STATE.shutdown_event.set()
+
     # Close audio stream
     try:
-        if audio_stream is not None:
-            audio_stream.stop()
-            audio_stream.close()
-            logger.info("Audio stream closed")
+        manager = _get_stream_manager()
+        manager.close()
+        STATE.audio_stream = None
+        logger.info("Audio stream closed")
     except Exception as e:
         logger.warning(f"Error closing audio stream: {e}")
 
@@ -528,84 +528,35 @@ def on_tray_exit(icon, item):
     cleanup_resources()
 
 
-def on_tray_calibrate(icon, item):
-    """Launch noise gate calibration tool."""
+def _launch_script_in_console(script_name, args=None):
+    """Launch a src/*.py helper script in a new console window."""
     import subprocess
-    logger.info("Launching calibration tool...")
-
-    # Get path to calibrate.py
+    args = args or []
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    calibrate_script = os.path.join(script_dir, 'calibrate.py')
-
-    # sys.executable may be pythonw.exe (windowless) which suppresses console
-    # windows entirely. Use python.exe instead so the calibration console appears.
+    script_path = os.path.join(script_dir, script_name)
     python_exe = sys.executable.replace('pythonw.exe', 'python.exe')
+    command = [python_exe, script_path] + list(args)
 
-    logger.info(f"Calibrate script: {calibrate_script}")
-    logger.info(f"Python executable: {python_exe}")
-
-    # Launch in new console window
     try:
         subprocess.Popen(
-            [python_exe, calibrate_script],
+            command,
             creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
         )
-        logger.info("Calibration process launched")
+        logger.info(f"Launched helper script: {script_name} {' '.join(args)}")
     except Exception as e:
-        logger.error(f"Failed to launch calibration: {e}")
+        logger.error(f"Failed to launch {script_name}: {e}")
+
+
+def on_tray_calibrate(icon, item):
+    """Launch noise gate calibration tool."""
+    logger.info("Launching calibration tool...")
+    _launch_script_in_console('calibrate.py')
 
 
 def on_tray_healthcheck(icon, item):
     """Launch startup healthcheck in a separate console window."""
-    import subprocess
     logger.info("Launching startup healthcheck...")
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    healthcheck_script = os.path.join(script_dir, 'startup_healthcheck.py')
-    python_exe = sys.executable.replace('pythonw.exe', 'python.exe')
-
-    logger.info(f"Healthcheck script: {healthcheck_script}")
-    logger.info(f"Python executable: {python_exe}")
-
-    try:
-        subprocess.Popen(
-            [python_exe, healthcheck_script, '--healthcheck-only'],
-            creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-        logger.info("Healthcheck process launched")
-    except Exception as e:
-        logger.error(f"Failed to launch healthcheck: {e}")
-
-
-def _atomic_write_text(path, content, encoding='utf-8'):
-    """Write text atomically (temp file + replace) to avoid partial config writes."""
-    directory = os.path.dirname(path)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode='w',
-            encoding=encoding,
-            delete=False,
-            dir=directory,
-            prefix='config.',
-            suffix='.tmp'
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-            tmp_path = tmp_file.name
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
-def _read_runtime_state():
-    """Read runtime state JSON. Returns {} when missing or invalid."""
-    return runtime_state.read_runtime_state(logger=logger)
+    _launch_script_in_console('startup_healthcheck.py', ['--healthcheck-only'])
 
 
 def _write_runtime_state(status, reason=None, details=None):
@@ -619,60 +570,26 @@ def _write_runtime_state(status, reason=None, details=None):
 
 
 def save_audio_device_to_config(device_name, device_hostapi=None, device_index=None, device_uid=None):
-    """Persist AUDIO_DEVICE identity to config.py using atomic writes."""
-    import re
+    """Persist AUDIO_DEVICE identity to config.py using structured key upserts."""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.py')
-
-    if not os.path.exists(config_path):
-        logger.warning(f"config.py not found at {config_path}, cannot persist device selection")
+    updates = {
+        'AUDIO_DEVICE': device_name,
+        'AUDIO_DEVICE_HOSTAPI': device_hostapi,
+        'AUDIO_DEVICE_INDEX': device_index,
+        'AUDIO_DEVICE_UID': device_uid,
+    }
+    comments = {
+        'AUDIO_DEVICE': '# Saved audio device identity (auto-managed)',
+    }
+    saved = config_store.update_config_values(config_path, updates, comments=comments, logger=logger)
+    if not saved:
         return
-
-    content = None
-    source_encoding = None
-    for encoding in ('utf-8', 'cp1252'):
-        try:
-            with open(config_path, 'r', encoding=encoding) as f:
-                content = f.read()
-            source_encoding = encoding
-            break
-        except UnicodeDecodeError:
-            continue
-
-    if content is None:
-        with open(config_path, 'r', encoding='utf-8', errors='replace') as f:
-            content = f.read()
-        source_encoding = 'utf-8-replace'
-        logger.warning("config.py could not be decoded as UTF-8 or cp1252. Rewriting with replacement chars.")
-    elif source_encoding != 'utf-8':
-        logger.warning(f"config.py decoded as {source_encoding}; rewriting as UTF-8")
-
-    def format_value(value):
-        if value is None:
-            return 'None'
-        if isinstance(value, int):
-            return str(value)
-        escaped = str(value).replace("'", "\\'")
-        return f"'{escaped}'"
-
-    def upsert_key(text, key, literal_value):
-        pattern = rf"(?m)^{re.escape(key)}\s*=.*$"
-        replacement = f"{key} = {literal_value}"
-        if re.search(pattern, text):
-            return re.sub(pattern, replacement, text, count=1)
-        if not text.endswith('\n'):
-            text += '\n'
-        return text + replacement + '\n'
-
-    content = upsert_key(content, 'AUDIO_DEVICE', format_value(device_name))
-    content = upsert_key(content, 'AUDIO_DEVICE_HOSTAPI', format_value(device_hostapi))
-    content = upsert_key(content, 'AUDIO_DEVICE_INDEX', format_value(device_index))
-    content = upsert_key(content, 'AUDIO_DEVICE_UID', format_value(device_uid))
-
-    _atomic_write_text(config_path, content, encoding='utf-8')
     logger.info(
         f"Saved AUDIO_DEVICE identity to config.py: "
-        f"name={format_value(device_name)}, hostapi={format_value(device_hostapi)}, "
-        f"index={format_value(device_index)}, uid={format_value(device_uid)}"
+        f"name={config_store.format_python_literal(device_name)}, "
+        f"hostapi={config_store.format_python_literal(device_hostapi)}, "
+        f"index={config_store.format_python_literal(device_index)}, "
+        f"uid={config_store.format_python_literal(device_uid)}"
     )
 
 
@@ -684,9 +601,8 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
     Device is persisted by name, not index.
     """
     global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
-    global audio_stream, active_mic_name, active_mic_index, active_mic_hostapi
 
-    if is_recording:
+    if STATE.is_recording:
         logger.warning("Cannot switch microphone while recording")
         return
 
@@ -731,58 +647,40 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
             f"Switching audio device to: [{device_index}] {device_name} ({device_hostapi}) uid={device_uid}"
         )
 
-        # Try to open the new stream BEFORE touching the old one
+        manager = _get_stream_manager()
         try:
-            new_stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32',
-                callback=audio_callback,
-                blocksize=1024,
-                device=device_index
-            )
-            new_stream.start()
+            manager.switch(device_index)
+            STATE.audio_stream = manager.stream
             logger.info(f"New audio stream opened on: [{device_index}] {device_name}")
         except Exception as e:
             logger.error(f"Failed to open new stream on [{device_index}] {device_name}: {e}")
             logger.info("Keeping current audio device unchanged")
             return
 
-        # New stream is confirmed working - now close the old one
-        old_stream = audio_stream
-        if old_stream is not None:
-            try:
-                old_stream.stop()
-                old_stream.close()
-                logger.info("Old audio stream closed")
-            except Exception as e:
-                logger.warning(f"Error closing old stream (non-fatal): {e}")
-
-        # Update global state only after new stream is confirmed working
-        audio_stream = new_stream
+        # Update state only after new stream is confirmed working
         AUDIO_DEVICE = device_name  # store name, not index
         AUDIO_DEVICE_HOSTAPI = device_hostapi
         AUDIO_DEVICE_INDEX = device_index
         AUDIO_DEVICE_UID = device_uid
-        active_mic_name = device_name
-        active_mic_index = device_index
-        active_mic_hostapi = device_hostapi
+        STATE.active_mic_name = device_name
+        STATE.active_mic_index = device_index
+        STATE.active_mic_hostapi = device_hostapi
 
         # Persist device identity to config.py
         save_audio_device_to_config(device_name, device_hostapi, device_index, device_uid=device_uid)
 
         try:
-            last_device_topology_signature = _current_input_topology_signature()
+            STATE.last_device_topology_signature = _current_input_topology_signature()
         except Exception:
             pass
 
         # Update tray to ready state (handles recovery from error state)
-        if model is not None:
+        if STATE.model is not None:
             update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
 
         # Refresh tray menu checkmarks
-        if tray_icon:
-            tray_icon.update_menu()
+        if STATE.tray_icon:
+            STATE.tray_icon.update_menu()
 
     except Exception as e:
         logger.error(f"Failed to switch audio device: {e}")
@@ -872,66 +770,48 @@ TRANSCRIBE_LANGUAGE = None if LANGUAGE == 'auto' else LANGUAGE
 
 SAMPLE_RATE = 16000
 
-# Parse hotkey into individual keys for release detection
-HOTKEY_PARTS = [k.strip() for k in HOTKEY.lower().split('+')]
-
-# Recording state
-is_recording = False
-audio_queue = queue.Queue()
-recorded_frames = []
-recording_start_time = 0
-
-# Microphone health monitoring
-last_callback_time = 0
 MAX_RECORDING_SECONDS = 120
-_silence_flag = False  # Set by audio_callback, read by monitor thread
+RECORDING_MONITOR_INTERVAL = 0.05
 
 
 def load_model():
     """Load Whisper model on GPU."""
-    global model
-    if model is None:
+    if STATE.model is None:
         logger.info(f"Loading {MODEL_SIZE} model on {DEVICE}...")
         from faster_whisper import WhisperModel
-        model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+        STATE.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
         logger.info("Model loaded successfully")
-    return model
+    return STATE.model
 
 
 def audio_callback(indata, frames, time_info, status):
     """Called for each audio block during recording."""
-    global last_callback_time, _silence_flag
-    last_callback_time = time.time()
+    STATE.last_callback_time = time.time()
     if status:
         logger.warning(f"Audio status: {status}")
-    if is_recording:
-        recorded_frames.append(indata.copy())
+    if STATE.is_recording:
+        STATE.recorded_frames.append(indata.copy())
         # Lightweight silence detection: check if this block is near-silent
         # and set a flag for the monitor thread to act on (avoid heavy work in callback)
         rms = np.sqrt(np.mean(indata ** 2))
-        if rms < 1e-6:
-            _silence_flag = True
-        else:
-            _silence_flag = False
+        STATE.silence_flag = bool(rms < 1e-6)
 
 
 def start_recording():
     """Start recording audio."""
-    global is_recording, recorded_frames, recording_start_time, _silence_flag
-    recorded_frames = []
-    _silence_flag = False
-    recording_start_time = time.time()
-    is_recording = True
+    STATE.recorded_frames = []
+    STATE.silence_flag = False
+    STATE.recording_start_time = time.time()
+    STATE.is_recording = True
     update_tray_icon('red', 'Voice Dictation - Recording...')
     logger.info("Recording started")
 
 
 def stop_recording_and_transcribe():
     """Stop recording, transcribe, and type the result."""
-    global is_recording
-    is_recording = False
+    STATE.is_recording = False
 
-    if not recorded_frames:
+    if not STATE.recorded_frames:
         logger.info("No audio captured")
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
         return
@@ -941,7 +821,7 @@ def stop_recording_and_transcribe():
 
     # Combine recorded audio with corruption guard
     try:
-        audio_data = np.concatenate(recorded_frames, axis=0)
+        audio_data = np.concatenate(STATE.recorded_frames, axis=0)
     except (ValueError, TypeError) as e:
         logger.error(f"Failed to concatenate audio frames (corrupt data?): {e}")
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
@@ -970,11 +850,6 @@ def stop_recording_and_transcribe():
         audio_flat = nr.reduce_noise(y=audio_flat, sr=SAMPLE_RATE)
         audio_data = audio_flat.reshape(-1, 1)
 
-    # Save to temp file (faster-whisper needs a file)
-    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
-        temp_path = f.name
-        sf.write(temp_path, audio_data, SAMPLE_RATE)
-
     try:
         # Transcribe with custom vocabulary as initial prompt
         start_time = time.time()
@@ -984,10 +859,13 @@ def stop_recording_and_transcribe():
         }
         if VOCABULARY:
             transcribe_opts['initial_prompt'] = VOCABULARY
-        segments, info = model.transcribe(temp_path, **transcribe_opts)
-
-        # Collect text
-        text = ' '.join(segment.text for segment in segments).strip()
+        text = transcription_io.transcribe_audio_array(
+            STATE.model,
+            audio_data,
+            SAMPLE_RATE,
+            sf_module=sf,
+            **transcribe_opts,
+        )
         elapsed = time.time() - start_time
 
         if text:
@@ -1009,24 +887,19 @@ def stop_recording_and_transcribe():
     except Exception as e:
         logger.error(f"Transcription error: {e}")
     finally:
-        # Clean up temp file
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
         # Reset tray icon to ready state
         update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
 
 
 def on_hotkey_press():
     """Called when hotkey is pressed."""
-    if not is_recording:
+    if not STATE.is_recording:
         start_recording()
 
 
 def on_hotkey_release():
     """Called when hotkey is released."""
-    if is_recording:
+    if STATE.is_recording:
         stop_recording_and_transcribe()
 
 
@@ -1050,7 +923,7 @@ def _dynamic_mic_submenu():
 
     def make_mic_checked(dev_idx):
         def is_checked(item):
-            return active_mic_index == dev_idx
+            return STATE.active_mic_index == dev_idx
         return is_checked
 
     items = []
@@ -1090,46 +963,15 @@ def build_tray_menu():
 
 
 def run_dictation_loop():
-    """Run the main dictation loop (hotkey monitoring)."""
-    # Register hotkey
+    """Run the main dictation loop (hotkey callbacks + recording watchdog)."""
     logger.info(f"Registering hotkey: {HOTKEY}")
     keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
+    keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
     logger.info("Hotkey registered. Ready for dictation!")
 
-    # Monitor for release and recording timeout
-    def check_release():
-        global is_recording
-        was_pressed = False
-        silence_warned = False
-        while True:
-            currently_pressed = all(keyboard.is_pressed(key) for key in HOTKEY_PARTS)
-
-            if was_pressed and not currently_pressed and is_recording:
-                silence_warned = False
-                stop_recording_and_transcribe()
-
-            # Check recording timeout
-            if is_recording and recording_start_time > 0:
-                elapsed = time.time() - recording_start_time
-                if elapsed > MAX_RECORDING_SECONDS:
-                    logger.warning(f"Recording timeout after {MAX_RECORDING_SECONDS}s - force stopping")
-                    silence_warned = False
-                    stop_recording_and_transcribe()
-
-                # Check silence flag from audio_callback (update tray warning)
-                if _silence_flag and not silence_warned:
-                    silence_warned = True
-                    update_tray_icon('red', 'Recording - Warning: mic may be muted')
-                elif not _silence_flag and silence_warned:
-                    silence_warned = False
-                    update_tray_icon('red', 'Voice Dictation - Recording...')
-
-            was_pressed = currently_pressed
-            time.sleep(0.01)  # 10ms polling
-
-    release_thread = threading.Thread(target=check_release, daemon=True)
-    release_thread.start()
-    logger.info("Release monitor thread started")
+    watchdog_thread = threading.Thread(target=_recording_state_watchdog, daemon=True)
+    watchdog_thread.start()
+    logger.info("Recording watchdog thread started")
 
     # Keep running until interrupted
     try:
@@ -1138,47 +980,64 @@ def run_dictation_loop():
         logger.info("Received KeyboardInterrupt, exiting...")
 
 
+def _recording_state_watchdog():
+    """Monitor timeout/silence while recording without key polling."""
+    silence_warned = False
+    while not STATE.shutdown_event.is_set():
+        if STATE.is_recording and STATE.recording_start_time > 0:
+            elapsed = time.time() - STATE.recording_start_time
+            if elapsed > MAX_RECORDING_SECONDS:
+                logger.warning(f"Recording timeout after {MAX_RECORDING_SECONDS}s - force stopping")
+                silence_warned = False
+                stop_recording_and_transcribe()
+                STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
+                continue
+
+            if STATE.silence_flag and not silence_warned:
+                silence_warned = True
+                update_tray_icon('red', 'Recording - Warning: mic may be muted')
+            elif not STATE.silence_flag and silence_warned:
+                silence_warned = False
+                update_tray_icon('red', 'Voice Dictation - Recording...')
+        else:
+            silence_warned = False
+
+        STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
+
+
 def test_microphone():
     """Non-blocking microphone test: record 0.5s and check if audio level is reasonable.
     Warns via log and tray tooltip if the mic appears muted, but never blocks startup.
-    Must be called after audio_stream is started.
+    Must be called after the main stream is started.
     """
-    if audio_stream is None or not audio_stream.active:
+    manager = _get_stream_manager()
+    if not manager.is_active:
         logger.warning("test_microphone: audio stream not active, skipping test")
         return
 
     logger.info("Running microphone self-test (0.5s capture)...")
-    test_frames = []
-
-    def _test_cb(indata, frames, time_info, status):
-        test_frames.append(indata.copy())
 
     try:
-        # Use a temporary stream for the test so we don't interfere with
-        # the main audio_callback (which only records when is_recording=True)
         test_device = _get_active_stream_device()
-        test_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
+        test_audio = audio_capture.capture_from_stream(
+            sd,
+            device_index=test_device,
+            seconds=0.5,
+            sample_rate=SAMPLE_RATE,
             channels=1,
             dtype='float32',
-            callback=_test_cb,
             blocksize=1024,
-            device=test_device
+            logger=logger,
         )
-        test_stream.start()
-        time.sleep(0.5)
-        test_stream.stop()
-        test_stream.close()
     except Exception as e:
         logger.warning(f"Microphone self-test failed to capture audio: {e}")
         return
 
-    if not test_frames:
+    if test_audio.size == 0:
         logger.warning("Microphone self-test: no frames captured")
         return
 
     try:
-        test_audio = np.concatenate(test_frames, axis=0)
         rms = np.sqrt(np.mean(test_audio ** 2))
     except Exception as e:
         logger.warning(f"Microphone self-test: error computing RMS: {e}")
@@ -1193,32 +1052,18 @@ def test_microphone():
 
 def _reopen_audio_stream(recovery_reason):
     """Try to reopen the current stream target. Returns True on success."""
-    global audio_stream, last_callback_time
     update_tray_icon('gray', f'Voice Dictation - Recovering audio ({recovery_reason})')
 
     try:
-        if audio_stream is not None:
-            try:
-                audio_stream.stop()
-                audio_stream.close()
-            except Exception:
-                pass
-
         device_to_open = _get_active_stream_device()
-        audio_stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype='float32',
-            callback=audio_callback,
-            blocksize=1024,
-            device=device_to_open
-        )
-        audio_stream.start()
-        last_callback_time = time.time()
+        manager = _get_stream_manager()
+        manager.reopen(device_to_open)
+        STATE.audio_stream = manager.stream
+        STATE.last_callback_time = time.time()
         logger.info(
             f"Audio stream recovered successfully ({recovery_reason}) on open_arg={device_to_open}"
         )
-        if model is not None:
+        if STATE.model is not None:
             update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
         _write_runtime_state('ready', reason=f'recovered:{recovery_reason}')
         return True
@@ -1236,14 +1081,15 @@ def stream_health_watchdog():
     2) The stream is active and receiving callbacks
     If unhealthy, attempts automatic recovery.
     """
-    global audio_stream, last_callback_time, last_device_topology_signature
     logger.info("Stream health watchdog started")
 
-    while True:
-        time.sleep(5)
+    while not STATE.shutdown_event.is_set():
+        STATE.shutdown_event.wait(5)
+        if STATE.shutdown_event.is_set():
+            break
 
         # Don't interfere while actively recording.
-        if is_recording:
+        if STATE.is_recording:
             continue
 
         # Detect device topology changes (dock/undock, device add/remove).
@@ -1255,61 +1101,48 @@ def stream_health_watchdog():
 
         if input_devices:
             current_signature = _current_input_topology_signature(input_devices)
-            if last_device_topology_signature is None:
-                last_device_topology_signature = current_signature
-            elif current_signature != last_device_topology_signature:
+            if STATE.last_device_topology_signature is None:
+                STATE.last_device_topology_signature = current_signature
+            elif current_signature != STATE.last_device_topology_signature:
                 logger.info("Detected input device topology change. Re-resolving preferred microphone.")
-                last_device_topology_signature = current_signature
-                previous_index = active_mic_index
+                STATE.last_device_topology_signature = current_signature
+                previous_index = STATE.active_mic_index
                 if check_microphone():
-                    if tray_icon:
-                        tray_icon.update_menu()
-                    if audio_stream is None or active_mic_index != previous_index:
+                    if STATE.tray_icon:
+                        STATE.tray_icon.update_menu()
+                    if STATE.audio_stream is None or STATE.active_mic_index != previous_index:
                         _reopen_audio_stream('device topology change')
                 else:
                     logger.warning("No usable microphone after topology change")
                     update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
                     _write_runtime_state('audio_error', reason='no_microphone_after_topology_change')
-                    if audio_stream is not None:
-                        try:
-                            audio_stream.stop()
-                            audio_stream.close()
-                        except Exception:
-                            pass
-                        audio_stream = None
+                    _get_stream_manager().close()
+                    STATE.audio_stream = None
                 continue
         else:
-            if last_device_topology_signature not in (None, ()):
+            if STATE.last_device_topology_signature not in (None, ()):
                 logger.warning("No input devices currently available")
-            last_device_topology_signature = ()
+            STATE.last_device_topology_signature = ()
             update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
             _write_runtime_state('audio_error', reason='no_input_devices')
-            if audio_stream is not None:
-                try:
-                    audio_stream.stop()
-                    audio_stream.close()
-                except Exception:
-                    pass
-                audio_stream = None
+            _get_stream_manager().close()
+            STATE.audio_stream = None
             continue
 
         # Recover missing stream when devices exist.
-        if audio_stream is None:
-            if active_mic_index is None and not check_microphone():
+        manager = _get_stream_manager()
+        if manager.stream is None:
+            if STATE.active_mic_index is None and not check_microphone():
                 update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
                 continue
             _reopen_audio_stream('stream missing')
             continue
 
-        stream_active = False
-        try:
-            stream_active = audio_stream.active
-        except Exception:
-            pass
+        stream_active = manager.is_active
 
         callback_stale = False
-        if last_callback_time > 0:
-            callback_stale = (time.time() - last_callback_time) > 10
+        if STATE.last_callback_time > 0:
+            callback_stale = (time.time() - STATE.last_callback_time) > 10
 
         if not stream_active or callback_stale:
             reason = "stream inactive" if not stream_active else "no callbacks for >10s"
@@ -1321,7 +1154,6 @@ def init_audio_and_dictation():
     """Background initialization: mic check, model load, audio stream, hotkey registration.
     The tray icon is already visible (gray) when this runs.
     """
-    global audio_stream
     mic_ok = False
 
     # Check microphone with fallback chain
@@ -1350,18 +1182,13 @@ def init_audio_and_dictation():
         try:
             device_to_open = _get_active_stream_device()
             logger.info(
-                f"Opening audio stream on device index={active_mic_index} "
+                f"Opening audio stream on device index={STATE.active_mic_index} "
                 f"name={AUDIO_DEVICE} open_arg={device_to_open}..."
             )
-            audio_stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype='float32',
-                callback=audio_callback,
-                blocksize=1024,
-                device=device_to_open
-            )
-            audio_stream.start()
+            manager = _get_stream_manager()
+            manager.open(device_to_open)
+            STATE.audio_stream = manager.stream
+            STATE.last_callback_time = time.time()
             logger.info("Audio stream started")
             update_tray_icon('green', f'Voice Dictation - Ready [{HOTKEY.upper()}]')
             _write_runtime_state('ready', reason='startup_complete')
@@ -1375,6 +1202,8 @@ def init_audio_and_dictation():
         except Exception as e:
             logger.exception(f"Failed to open audio stream: {e}")
             update_tray_icon('gray', 'Voice Dictation - Audio error (see log)')
+            _get_stream_manager().close()
+            STATE.audio_stream = None
             _write_runtime_state('audio_error', reason='stream_open_failed', details=str(e))
     else:
         update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
@@ -1385,10 +1214,9 @@ def init_audio_and_dictation():
 
 
 def main():
-    global tray_icon
-
     try:
         # Ensure only one instance runs
+        STATE.shutdown_event.clear()
         check_single_instance()
         _write_runtime_state('starting', reason='process_boot')
         logger.info("Starting main()")
@@ -1407,7 +1235,7 @@ def main():
         if TRAY_AVAILABLE:
             # Show tray icon immediately so the user sees the app is running
             menu = build_tray_menu()
-            tray_icon = pystray.Icon(
+            STATE.tray_icon = pystray.Icon(
                 'voice-dictation',
                 create_tray_image('gray'),
                 'Voice Dictation - Starting...',
@@ -1420,7 +1248,7 @@ def main():
 
             # Run tray icon on main thread (blocks until exit)
             logger.info("Starting system tray icon")
-            tray_icon.run()
+            STATE.tray_icon.run()
         else:
             # Console mode - run init synchronously
             print("=" * 50)

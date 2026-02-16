@@ -216,6 +216,11 @@ This primes the model to recognize these spellings correctly. Just list the word
 | `src/dictate.py` | Main application - system tray, hotkey, transcription |
 | `src/audio_device_identity.py` | Shared microphone identity, UID, and fallback resolution helpers |
 | `src/runtime_state.py` | Shared runtime state read/write helpers (`%LOCALAPPDATA%\VoiceDictation\state.json`) |
+| `src/app_state.py` | Dataclass-backed runtime state container for dictation lifecycle |
+| `src/audio_stream_manager.py` | Centralized stream open/close/switch/reopen behavior |
+| `src/audio_capture.py` | Shared audio probe and fixed-duration capture helpers |
+| `src/transcription_io.py` | Shared temporary WAV transcription pipeline for Whisper |
+| `src/config_store.py` | Structured `config.py` read/update helpers with atomic writes |
 | `src/speak.py` | Text-to-speech utility (see below) |
 | `src/config.py` | Your settings (generated) |
 | `src/config.example.py` | Configuration template |
@@ -232,6 +237,11 @@ This primes the model to recognize these spellings correctly. Just list the word
 - `tests/test_calibrate.py` - calibration and fallback behavior
 - `tests/test_audio_device_identity.py` - shared device identity and resolution logic
 - `tests/test_runtime_state.py` - shared runtime state persistence helpers
+- `tests/test_config_store.py` - config assignment upsert and literal formatting
+- `tests/test_audio_stream_manager.py` - stream lifecycle abstraction behavior
+- `tests/test_audio_capture.py` - shared capture/probe helpers
+- `tests/test_transcription_io.py` - temporary WAV transcription helper behavior
+- `tests/test_app_state.py` - runtime state container defaults
 
 ### speak.py - Text-to-Speech Utility
 
