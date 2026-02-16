@@ -46,3 +46,14 @@ def test_transcribe_audio_array_uses_temp_file_and_cleans_up():
     assert len(fake_sf.writes) == 1
     temp_path = fake_sf.writes[0][0]
     assert not os.path.exists(temp_path)
+
+
+def test_sanitize_transcript_text_removes_control_chars_and_normalizes_whitespace():
+    raw = 'hello\tworld\nnext\u200bline\r\n'
+    cleaned = transcription_io.sanitize_transcript_text(raw)
+    assert cleaned == 'hello world next line'
+
+
+def test_sanitize_transcript_text_handles_empty_values():
+    assert transcription_io.sanitize_transcript_text('') == ''
+    assert transcription_io.sanitize_transcript_text(None) == ''

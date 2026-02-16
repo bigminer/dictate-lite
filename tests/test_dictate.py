@@ -514,6 +514,25 @@ class TestRecordingTimeout:
         assert 'MAX_RECORDING_SECONDS = 120' in source
 
 
+class TestHotkeyReleaseFallback:
+    """Tests for hotkey release fallback logic."""
+
+    def test_hotkey_parts_are_parsed(self):
+        """Hotkey parser should split configured combo into individual keys."""
+        src_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'dictate.py')
+        with open(src_path, 'r') as f:
+            source = f.read()
+        assert "HOTKEY_PARTS = [part.strip() for part in HOTKEY.split('+') if part.strip()]" in source
+
+    def test_watchdog_has_release_fallback(self):
+        """Watchdog should stop recording when key state indicates release."""
+        src_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'dictate.py')
+        with open(src_path, 'r') as f:
+            source = f.read()
+        assert 'if not _is_hotkey_currently_pressed():' in source
+        assert 'Recording stop fallback triggered: hotkey no longer pressed' in source
+
+
 class TestStopRecordingCorruptionGuard:
     """Tests for corrupt/short audio handling in stop_recording_and_transcribe()."""
 

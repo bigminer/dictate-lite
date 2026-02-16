@@ -772,6 +772,10 @@ SAMPLE_RATE = 16000
 
 MAX_RECORDING_SECONDS = 120
 RECORDING_MONITOR_INTERVAL = 0.05
+HOTKEY_PARTS = [part.strip() for part in HOTKEY.split('+') if part.strip()]
+
+if not HOTKEY_PARTS:
+    logger.warning(f"HOTKEY '{HOTKEY}' could not be parsed into keys")
 
 
 def load_model():
@@ -859,16 +863,19 @@ def stop_recording_and_transcribe():
         }
         if VOCABULARY:
             transcribe_opts['initial_prompt'] = VOCABULARY
-        text = transcription_io.transcribe_audio_array(
+        raw_text = transcription_io.transcribe_audio_array(
             STATE.model,
             audio_data,
             SAMPLE_RATE,
             sf_module=sf,
             **transcribe_opts,
         )
+        text = transcription_io.sanitize_transcript_text(raw_text)
         elapsed = time.time() - start_time
 
         if text:
+            if raw_text != text:
+                logger.info("Transcript normalized before output")
             logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
 
             # Copy to clipboard if enabled
@@ -878,9 +885,10 @@ def stop_recording_and_transcribe():
             # Type the text into active window
             # Small delay to ensure window focus
             time.sleep(0.05)
+            _release_modifier_keys()
             # Add delay between keystrokes to prevent Claude Code crash
             # (Known bug: rapid text injection causes TUI crash)
-            keyboard.write(text, delay=0.01)  # 10ms between characters
+            keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
         else:
             logger.info("No speech detected")
 
@@ -901,6 +909,32 @@ def on_hotkey_release():
     """Called when hotkey is released."""
     if STATE.is_recording:
         stop_recording_and_transcribe()
+
+
+def _is_hotkey_currently_pressed():
+    """Best-effort hotkey state check for release-callback fallback logic."""
+    if not HOTKEY_PARTS:
+        return True
+    try:
+        return all(keyboard.is_pressed(key) for key in HOTKEY_PARTS)
+    except Exception as e:
+        logger.debug(f"Hotkey state check failed: {e}")
+        return True
+
+
+def _release_modifier_keys():
+    """Best-effort release of modifier keys before synthetic typing."""
+    modifier_keys = (
+        'alt', 'left alt', 'right alt',
+        'ctrl', 'left ctrl', 'right ctrl',
+        'shift', 'left shift', 'right shift',
+        'windows', 'left windows', 'right windows',
+    )
+    for key in modifier_keys:
+        try:
+            keyboard.release(key)
+        except Exception:
+            pass
 
 
 def _dynamic_mic_submenu():
@@ -981,10 +1015,17 @@ def run_dictation_loop():
 
 
 def _recording_state_watchdog():
-    """Monitor timeout/silence while recording without key polling."""
+    """Monitor timeout/silence and fallback key-release detection while recording."""
     silence_warned = False
     while not STATE.shutdown_event.is_set():
         if STATE.is_recording and STATE.recording_start_time > 0:
+            if not _is_hotkey_currently_pressed():
+                logger.info("Recording stop fallback triggered: hotkey no longer pressed")
+                silence_warned = False
+                stop_recording_and_transcribe()
+                STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
+                continue
+
             elapsed = time.time() - STATE.recording_start_time
             if elapsed > MAX_RECORDING_SECONDS:
                 logger.warning(f"Recording timeout after {MAX_RECORDING_SECONDS}s - force stopping")

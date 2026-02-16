@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
+import unicodedata
+
+_WHITESPACE_RE = re.compile(r'\s+')
 
 
 def load_whisper_model(model_size, device, compute_type, fallback_model='tiny', logger=None):
@@ -36,3 +40,16 @@ def transcribe_audio_array(model, audio, sample_rate, sf_module, **transcribe_kw
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def sanitize_transcript_text(text):
+    """Remove control characters and normalize whitespace for safe key injection."""
+    if not text:
+        return ''
+
+    normalized = unicodedata.normalize('NFKC', str(text))
+    cleaned = ''.join(
+        ' ' if unicodedata.category(char).startswith('C') else char
+        for char in normalized
+    )
+    return _WHITESPACE_RE.sub(' ', cleaned).strip()
