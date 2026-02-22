@@ -82,13 +82,6 @@ except Exception as e:
     raise
 
 try:
-    import soundfile as sf
-    logger.info("soundfile imported OK")
-except Exception as e:
-    logger.error(f"Failed to import soundfile: {e}")
-    raise
-
-try:
     import numpy as np
     logger.info("numpy imported OK")
 except Exception as e:
@@ -548,6 +541,10 @@ def cleanup_resources():
     # Persist clean shutdown marker before hard exit
     _write_runtime_state('shutdown_clean', reason='cleanup_resources')
 
+    # Give daemon threads up to 2s to finish before hard exit
+    logger.info("Waiting up to 2s for threads to finish...")
+    time.sleep(2)
+
     # os._exit as last step - required because pystray/keyboard threads
     # can prevent a clean sys.exit()
     os._exit(0)
@@ -965,8 +962,6 @@ def _transcribe_and_emit_text(audio_data):
     raw_text = transcription_io.transcribe_audio_array(
         STATE.model,
         audio_data,
-        SAMPLE_RATE,
-        sf_module=sf,
         **transcribe_opts,
     )
     text = transcription_io.sanitize_transcript_text(raw_text)
@@ -998,7 +993,7 @@ def _transcribe_and_emit_text(audio_data):
     _release_modifier_keys()
     # Add delay between keystrokes to prevent Claude Code crash
     # (Known bug: rapid text injection causes TUI crash)
-    keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
+    keyboard.write(text, delay=0.01, restore_state_after=True)  # 10ms between characters
 
 
 def stop_recording_and_transcribe():

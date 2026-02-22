@@ -50,13 +50,10 @@ python -c "import numpy; print('       OK: numpy')" 2>nul || (
 
 :: Check CUDA availability
 echo [4/5] Testing CUDA/GPU support...
-python -c "import torch; cuda=torch.cuda.is_available(); print(f'       {\"OK: CUDA available\" if cuda else \"WARN: CUDA not available (CPU mode)\"}')" 2>nul || (
-    echo       INFO: torch not installed, checking nvidia-smi...
-    nvidia-smi >nul 2>&1 && (
-        echo       OK: NVIDIA GPU detected
-    ) || (
-        echo       WARN: No NVIDIA GPU detected - will use CPU mode
-    )
+nvidia-smi >nul 2>&1 && (
+    echo       OK: NVIDIA GPU detected
+) || (
+    echo       WARN: No NVIDIA GPU detected - will use CPU mode
 )
 
 :: Check audio devices

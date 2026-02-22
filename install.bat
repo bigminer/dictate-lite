@@ -158,7 +158,17 @@ echo.
 
 set "HOTKEY=alt+f"
 set /p "USER_HOTKEY=Enter hotkey [alt+f]: "
-if not "!USER_HOTKEY!"=="" set "HOTKEY=!USER_HOTKEY!"
+if not "!USER_HOTKEY!"=="" (
+    echo !USER_HOTKEY!| findstr /r "^[a-zA-Z0-9+ ]*$" >nul
+    if errorlevel 1 (
+        echo.
+        echo  WARNING: Invalid hotkey '!USER_HOTKEY!' - only letters, numbers, +, and spaces are allowed.
+        echo  Using default: alt+f
+        set "HOTKEY=alt+f"
+    ) else (
+        set "HOTKEY=!USER_HOTKEY!"
+    )
+)
 
 :: Warn about potentially problematic hotkeys
 echo !HOTKEY! | findstr /i "ctrl+c ctrl+v ctrl+x ctrl+z ctrl+s ctrl+a alt+tab alt+f4" >nul

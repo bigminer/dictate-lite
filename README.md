@@ -144,6 +144,10 @@ Run `uninstall.bat` to remove:
 - Log files
 - Optionally: downloaded model cache (~500MB-3GB)
 
+## Security Considerations
+
+The `keyboard` library used for hotkey detection installs a global keyboard hook via the Windows API. This hook receives all keystrokes system-wide, not just the configured hotkey. The application only processes press/release events for the configured hotkey and discards all other key events immediately. No keystrokes are logged, stored, or transmitted. Users should ensure the application is installed from a trusted source and review the `src/dictate.py` hotkey handler if concerned.
+
 ## Troubleshooting
 
 ### "Python not found"

@@ -72,11 +72,25 @@ def check_context_alert(remaining_pct):
             last_warn_time = current_time
 
 
+_ALLOWED_COMMANDS = frozenset({
+    'ccstatusline', 'ccstatusline.exe', 'ccstatusline.cmd',
+    'npx', 'npx.exe', 'npx.cmd',
+    'node', 'node.exe',
+})
+
+
 def build_ccstatusline_command():
     """Return command tokens for launching ccstatusline without shell execution."""
     custom = os.environ.get('CCSTATUSLINE_COMMAND')
     if custom:
-        return shlex.split(custom, posix=False)
+        tokens = shlex.split(custom, posix=False)
+        basename = os.path.basename(tokens[0]).lower()
+        if basename not in _ALLOWED_COMMANDS:
+            raise ValueError(
+                f'CCSTATUSLINE_COMMAND executable {tokens[0]!r} is not in '
+                f'the allowed list: {sorted(_ALLOWED_COMMANDS)}'
+            )
+        return tokens
 
     if '@' not in CCSTATUSLINE_PACKAGE or CCSTATUSLINE_PACKAGE.endswith('@latest'):
         raise ValueError(

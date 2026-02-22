@@ -16,7 +16,6 @@ import argparse
 
 import numpy as np
 import sounddevice as sd
-import soundfile as sf
 
 import audio_device_identity as audio_identity
 import audio_capture
@@ -172,8 +171,6 @@ def transcribe_audio(cfg, audio):
     return transcription_io.transcribe_audio_array(
         model,
         audio,
-        SAMPLE_RATE,
-        sf_module=sf,
         beam_size=3,
         language=language,
     )

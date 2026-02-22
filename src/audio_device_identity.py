@@ -33,7 +33,7 @@ def build_device_uid(device_name, hostapi_name, device_info):
         _format_float(device_info.get('default_low_input_latency')),
         _format_float(device_info.get('default_high_input_latency')),
     ])
-    return hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:20]
+    return hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()[:20]
 
 
 def enumerate_input_devices(sd_module):

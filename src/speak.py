@@ -21,20 +21,23 @@ async def speak(text, voice='en-US-BrianNeural'):
     await communicate.save(temp_file)
 
     # Play using PowerShell and .NET without visible window
-    ps_script = f'''
-    Add-Type -AssemblyName PresentationCore
-    $player = New-Object System.Windows.Media.MediaPlayer
-    $player.Volume = 1
-    $player.Open([Uri]"{temp_file}")
-    Start-Sleep -Milliseconds 500
-    $player.Play()
-    Start-Sleep -Milliseconds 500
-    while ($player.Position.TotalSeconds -lt $player.NaturalDuration.TimeSpan.TotalSeconds - 0.1) {{
-        Start-Sleep -Milliseconds 100
-    }}
-    Start-Sleep -Milliseconds 300
-    $player.Close()
-    '''
+    # Escape single quotes in path by doubling them (PowerShell convention)
+    safe_path = temp_file.replace("'", "''")
+    ps_script = (
+        "Add-Type -AssemblyName PresentationCore\n"
+        "$player = New-Object System.Windows.Media.MediaPlayer\n"
+        "$player.Volume = 1\n"
+        "$player.Open([Uri]'" + safe_path + "')\n"
+        "Start-Sleep -Milliseconds 500\n"
+        "$player.Play()\n"
+        "Start-Sleep -Milliseconds 500\n"
+        "while ($player.Position.TotalSeconds -lt "
+        "$player.NaturalDuration.TimeSpan.TotalSeconds - 0.1) {\n"
+        "    Start-Sleep -Milliseconds 100\n"
+        "}\n"
+        "Start-Sleep -Milliseconds 300\n"
+        "$player.Close()\n"
+    )
 
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW

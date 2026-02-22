@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 import unicodedata
+
+import numpy as np
 
 _WHITESPACE_RE = re.compile(r'\s+')
 
@@ -25,21 +25,11 @@ def load_whisper_model(model_size, device, compute_type, fallback_model='tiny', 
         return WhisperModel(fallback_model, device='cpu', compute_type='int8'), True
 
 
-def transcribe_audio_array(model, audio, sample_rate, sf_module, **transcribe_kwargs):
-    """Transcribe numpy audio array by writing a temporary WAV file."""
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as handle:
-            temp_path = handle.name
-        sf_module.write(temp_path, audio, sample_rate)
-        segments, _ = model.transcribe(temp_path, **transcribe_kwargs)
-        return ' '.join(segment.text for segment in segments).strip()
-    finally:
-        if temp_path and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+def transcribe_audio_array(model, audio, **transcribe_kwargs):
+    """Transcribe numpy audio array by passing it directly to faster-whisper."""
+    audio_1d = np.ravel(audio).astype(np.float32, copy=False)
+    segments, _ = model.transcribe(audio_1d, **transcribe_kwargs)
+    return ' '.join(segment.text for segment in segments).strip()
 
 
 def sanitize_transcript_text(text):

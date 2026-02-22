@@ -1,7 +1,5 @@
 """Unit tests for transcription_io helpers."""
 
-import os
-
 import numpy as np
 
 import transcription_io
@@ -13,39 +11,33 @@ class _Segment:
 
 
 class _FakeModel:
-    def transcribe(self, path, **kwargs):
-        assert os.path.exists(path)
+    """Fake model that records what it receives for assertion."""
+
+    def __init__(self):
+        self.last_audio = None
+
+    def transcribe(self, audio, **kwargs):
+        self.last_audio = audio
         return [_Segment('check'), _Segment('1 2 3')], {'language': 'en'}
 
 
-class _FakeSoundFile:
-    def __init__(self):
-        self.writes = []
-
-    def write(self, path, audio, sample_rate):
-        self.writes.append((path, sample_rate, len(audio)))
-        with open(path, 'wb') as handle:
-            handle.write(b'RIFF')
-
-
-def test_transcribe_audio_array_uses_temp_file_and_cleans_up():
-    fake_sf = _FakeSoundFile()
+def test_transcribe_audio_array_passes_numpy_directly():
     model = _FakeModel()
     audio = np.zeros((160, 1), dtype=np.float32)
 
     text = transcription_io.transcribe_audio_array(
         model,
         audio,
-        sample_rate=16000,
-        sf_module=fake_sf,
         beam_size=3,
         language='en',
     )
 
     assert text == 'check 1 2 3'
-    assert len(fake_sf.writes) == 1
-    temp_path = fake_sf.writes[0][0]
-    assert not os.path.exists(temp_path)
+    # Model should receive a flattened 1-D float32 array
+    assert model.last_audio is not None
+    assert model.last_audio.ndim == 1
+    assert model.last_audio.dtype == np.float32
+    assert model.last_audio.shape[0] == 160
 
 
 def test_sanitize_transcript_text_removes_control_chars_and_normalizes_whitespace():
