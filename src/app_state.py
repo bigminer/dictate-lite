@@ -29,5 +29,12 @@ class DictationAppState:
     tray_color: str | None = None
     tray_title: str | None = None
 
+    session_id: str = ""
+    utterance_count: int = 0
+    total_recording_ms: int = 0
+    total_chars_typed: int = 0
+    device_fallback_count: int = 0
+    transcription_errors: int = 0
+
     shutdown_event: Event = field(default_factory=Event)
     lock: RLock = field(default_factory=RLock)

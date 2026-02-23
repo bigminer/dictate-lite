@@ -9,6 +9,7 @@ import threading
 import tempfile
 import os
 import time
+import uuid
 import atexit
 import signal
 import logging
@@ -32,14 +33,26 @@ _DEFAULT_LOG_LEVEL = getattr(logging, _DEFAULT_LOG_LEVEL_NAME, logging.INFO)
 if not isinstance(_DEFAULT_LOG_LEVEL, int):
     _DEFAULT_LOG_LEVEL = logging.INFO
 
+SESSION_ID = uuid.uuid4().hex[:12]
+
+
+class SessionFilter(logging.Filter):
+    """Inject session_id into every log record."""
+
+    def filter(self, record):
+        record.session_id = SESSION_ID
+        return True
+
+
 logging.basicConfig(
     level=_DEFAULT_LOG_LEVEL,
-    format='%(asctime)s [%(levelname)s] %(message)s',
+    format='%(asctime)s [%(levelname)s] [%(process)d/%(session_id)s] %(message)s',
     handlers=[
         RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=5, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+logging.getLogger().addFilter(SessionFilter())
 logger = logging.getLogger(__name__)
 
 
@@ -69,28 +82,28 @@ logger.info(f"State file: {runtime_state.STATE_FILE}")
 
 try:
     import keyboard
-    logger.info("keyboard imported OK")
+    logger.debug("keyboard imported OK")
 except Exception as e:
     logger.error(f"Failed to import keyboard: {e}")
     raise
 
 try:
     import sounddevice as sd
-    logger.info("sounddevice imported OK")
+    logger.debug("sounddevice imported OK")
 except Exception as e:
     logger.error(f"Failed to import sounddevice: {e}")
     raise
 
 try:
     import numpy as np
-    logger.info("numpy imported OK")
+    logger.debug("numpy imported OK")
 except Exception as e:
     logger.error(f"Failed to import numpy: {e}")
     raise
 
 try:
     import pyperclip
-    logger.info("pyperclip imported OK")
+    logger.debug("pyperclip imported OK")
 except Exception as e:
     logger.error(f"Failed to import pyperclip: {e}")
     raise
@@ -98,7 +111,7 @@ except Exception as e:
 try:
     import pystray
     from PIL import Image, ImageDraw
-    logger.info("pystray imported OK")
+    logger.debug("pystray imported OK")
     TRAY_AVAILABLE = True
 except Exception as e:
     logger.warning(f"pystray not available, will use console mode: {e}")
@@ -106,7 +119,7 @@ except Exception as e:
 
 try:
     import noisereduce as nr
-    logger.info("noisereduce imported OK")
+    logger.debug("noisereduce imported OK")
     NOISEREDUCE_AVAILABLE = True
 except Exception as e:
     logger.warning(f"noisereduce not available: {e}")
@@ -266,6 +279,8 @@ def check_microphone():
             or prior_index != resolved_idx
             or prior_uid != resolved_uid
         ):
+            if prior_name is not None:
+                STATE.device_fallback_count += 1
             save_audio_device_to_config(
                 resolved_name,
                 resolved_hostapi,
@@ -538,8 +553,15 @@ def cleanup_resources():
     # Release singleton mutex
     _release_single_instance_mutex()
 
-    # Persist clean shutdown marker before hard exit
-    _write_runtime_state('shutdown_clean', reason='cleanup_resources')
+    # Persist clean shutdown marker with session metrics before hard exit
+    _write_runtime_state('shutdown_clean', reason='cleanup_resources', details={
+        'session_id': STATE.session_id,
+        'utterance_count': STATE.utterance_count,
+        'total_recording_ms': STATE.total_recording_ms,
+        'total_chars_typed': STATE.total_chars_typed,
+        'device_fallback_count': STATE.device_fallback_count,
+        'transcription_errors': STATE.transcription_errors,
+    })
 
     # Give daemon threads up to 2s to finish before hard exit
     logger.info("Waiting up to 2s for threads to finish...")
@@ -653,7 +675,7 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
                     if not device_uid:
                         device_uid = detected_uid
             except Exception:
-                pass
+                logger.debug("Failed to build device UID", exc_info=True)
 
         if not device_hostapi or not device_uid:
             try:
@@ -667,6 +689,7 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
                 if not device_uid:
                     device_uid = _build_device_uid(device_name, device_hostapi, dev_info)
             except Exception:
+                logger.debug("Failed to query device hostapi", exc_info=True)
                 if not device_hostapi:
                     device_hostapi = None
                 if not device_uid:
@@ -701,7 +724,7 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
         try:
             STATE.last_device_topology_signature = _current_input_topology_signature()
         except Exception:
-            pass
+            logger.debug("Failed to compute topology signature", exc_info=True)
 
         # Update tray to ready state (handles recovery from error state)
         if STATE.model is not None:
@@ -952,36 +975,46 @@ def _prepare_audio_for_transcription(recorded_frames):
 
 def _transcribe_and_emit_text(audio_data):
     """Run Whisper transcription then emit text to clipboard/active window."""
-    start_time = time.time()
     transcribe_opts = {
         'beam_size': 5,
         'language': TRANSCRIBE_LANGUAGE,
     }
     if VOCABULARY:
         transcribe_opts['initial_prompt'] = VOCABULARY
+    t0 = time.perf_counter()
     raw_text = transcription_io.transcribe_audio_array(
         STATE.model,
         audio_data,
         **transcribe_opts,
     )
+    transcription_ms = (time.perf_counter() - t0) * 1000
     text = transcription_io.sanitize_transcript_text(raw_text)
     if len(text) > MAX_TYPED_CHARS:
         logger.warning(
             f"Transcript length {len(text)} exceeds MAX_TYPED_CHARS={MAX_TYPED_CHARS}; truncating output"
         )
         text = text[:MAX_TYPED_CHARS].rstrip()
-    elapsed = time.time() - start_time
+
+    audio_duration_s = len(audio_data) / SAMPLE_RATE
+    logger.info("Transcription complete", extra={
+        "transcription_ms": round(transcription_ms, 1),
+        "audio_s": round(audio_duration_s, 2),
+        "text_len": len(text) if text else 0,
+    })
 
     if not text:
         logger.info("No speech detected")
         return
 
+    STATE.utterance_count += 1
+    STATE.total_recording_ms += int(transcription_ms)
+
     if raw_text != text:
         logger.info("Transcript normalized before output")
     if LOG_TRANSCRIPT_TEXT:
-        logger.info(f"Transcribed ({elapsed:.1f}s): {text[:50]}...")
+        logger.info(f"Transcribed ({transcription_ms:.0f}ms): {text[:50]}...")
     else:
-        logger.info(f"Transcribed ({elapsed:.1f}s), {len(text)} chars")
+        logger.info(f"Transcribed ({transcription_ms:.0f}ms), {len(text)} chars")
 
     # Copy to clipboard if enabled
     if USE_CLIPBOARD:
@@ -994,6 +1027,7 @@ def _transcribe_and_emit_text(audio_data):
     # Add delay between keystrokes to prevent Claude Code crash
     # (Known bug: rapid text injection causes TUI crash)
     keyboard.write(text, delay=0.01, restore_state_after=True)  # 10ms between characters
+    STATE.total_chars_typed += len(text)
 
 
 def stop_recording_and_transcribe():
@@ -1011,6 +1045,7 @@ def stop_recording_and_transcribe():
         _transcribe_and_emit_text(audio_data)
     except Exception as e:
         logger.error(f"Transcription error: {e}")
+        STATE.transcription_errors += 1
     finally:
         _finish_processing_cycle()
 
@@ -1044,7 +1079,7 @@ def _release_modifier_keys():
         try:
             keyboard.release(key)
         except Exception:
-            pass
+            logger.debug("Failed to release modifier key %s", key, exc_info=True)
 
 
 def _dynamic_mic_submenu():
@@ -1310,6 +1345,12 @@ def stream_health_watchdog():
             _reopen_audio_stream(reason)
 
 
+def _heartbeat_loop():
+    """Update state.json every 60s so external tools can detect a hung process."""
+    while not STATE.shutdown_event.wait(timeout=60):
+        _write_runtime_state('heartbeat')
+
+
 def init_audio_and_dictation():
     """Background initialization: mic check, model load, audio stream, hotkey registration.
     The tray icon is already visible (gray) when this runs.
@@ -1377,9 +1418,14 @@ def main():
     try:
         # Ensure only one instance runs
         STATE.shutdown_event.clear()
+        STATE.session_id = SESSION_ID
         check_single_instance()
         _write_runtime_state('starting', reason='process_boot')
         logger.info("Starting main()")
+
+        # Start heartbeat daemon so external tools can detect hung processes
+        heartbeat_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
 
         # Register signal handlers for graceful shutdown
         def _signal_handler(signum, frame):

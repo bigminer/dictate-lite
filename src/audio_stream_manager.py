@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class AudioStreamManager:
     """Manage an active sounddevice InputStream with safe switching."""
@@ -32,6 +36,7 @@ class AudioStreamManager:
         try:
             return bool(self.stream and self.stream.active)
         except Exception:
+            logger.debug("Stream active check failed", exc_info=True)
             return False
 
     def _build_stream(self, device):
@@ -51,11 +56,11 @@ class AudioStreamManager:
         try:
             self.stream.stop()
         except Exception:
-            pass
+            logger.debug("Stream stop failed", exc_info=True)
         try:
             self.stream.close()
         except Exception:
-            pass
+            logger.debug("Stream close failed", exc_info=True)
         self.stream = None
         self.current_device = None
 
@@ -82,11 +87,11 @@ class AudioStreamManager:
             try:
                 old_stream.stop()
             except Exception:
-                pass
+                logger.debug("Old stream stop failed", exc_info=True)
             try:
                 old_stream.close()
             except Exception:
-                pass
+                logger.debug("Old stream close failed", exc_info=True)
 
         return old_stream, old_device
 

@@ -5,6 +5,9 @@ Shared audio input device identity and resolution helpers.
 from __future__ import annotations
 
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_device_name(name):
@@ -185,7 +188,7 @@ def resolve_preferred_input_device(
                     hostapi_name = hostapis[hidx]['name']
                 return saved_name, dev['name'], hostapi_name, build_device_uid(dev['name'], hostapi_name, dev)
         except Exception:
-            pass
+            logger.debug("UID-based device match failed", exc_info=True)
 
     if default_idx is not None:
         by_index = [d for d in input_devices if d[0] == default_idx]
@@ -203,7 +206,7 @@ def resolve_preferred_input_device(
                     hostapi_name = hostapis[hidx]['name']
                 return default_idx, dev['name'], hostapi_name, build_device_uid(dev['name'], hostapi_name, dev)
         except Exception:
-            pass
+            logger.debug("Default device query failed", exc_info=True)
 
     if input_devices:
         first = input_devices[0]
