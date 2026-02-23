@@ -630,3 +630,44 @@ class TestAudioDeviceStringCompatibility:
             if d['max_input_channels'] > 0:
                 assert isinstance(d['name'], str), "Device name should be a string"
                 assert len(d['name']) > 0, "Device name should not be empty"
+
+
+# ===================================================================
+# REGRESSION: Modifier-key sticky bug (restore_state_after)
+# ===================================================================
+
+class TestKeyboardWriteRestoreState:
+    """Regression guard for the restore_state_after=True bug.
+
+    When keyboard.write() is called with restore_state_after=True, the
+    keyboard library saves modifier key state before writing and restores
+    it afterward.  Because the dictation hotkey uses a modifier (e.g. Alt),
+    the library re-presses that modifier after the text is written, causing
+    stuck-key symptoms: Alt+Enter toggles fullscreen, Alt+Space opens the
+    system menu, etc.
+
+    The correct value is restore_state_after=False.  This test reads the
+    source to ensure it never regresses.
+    """
+
+    def test_restore_state_after_is_false(self):
+        """keyboard.write() must use restore_state_after=False."""
+        import re
+
+        src_dir = os.path.join(os.path.dirname(__file__), '..', 'src')
+        with open(os.path.join(src_dir, 'dictate.py'), 'r') as f:
+            source = f.read()
+
+        # Find all keyboard.write() calls in the source
+        pattern = re.compile(r'keyboard\.write\([^)]*restore_state_after\s*=\s*(\w+)')
+        matches = pattern.findall(source)
+
+        assert len(matches) > 0, (
+            "Expected at least one keyboard.write() call with restore_state_after parameter"
+        )
+        for value in matches:
+            assert value == 'False', (
+                f"keyboard.write() must use restore_state_after=False to prevent "
+                f"stuck modifier keys after hotkey-triggered transcription, "
+                f"but found restore_state_after={value}"
+            )

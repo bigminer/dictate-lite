@@ -572,6 +572,33 @@ def cleanup_resources():
     os._exit(0)
 
 
+def on_tray_restart(icon, item):
+    """Restart the application by spawning a new process then exiting."""
+    import subprocess
+
+    logger.info("Restart requested from tray menu")
+    my_pid = os.getpid()
+    script_path = os.path.abspath(__file__)
+    python_exe = sys.executable
+    # Prefer pythonw for background operation (no console window)
+    pythonw_exe = python_exe.replace('python.exe', 'pythonw.exe')
+    if not os.path.isfile(pythonw_exe):
+        pythonw_exe = python_exe
+
+    try:
+        subprocess.Popen(
+            [pythonw_exe, script_path, '--restart-after-pid', str(my_pid)],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        logger.info(f"Spawned restart process (waiting on PID {my_pid})")
+    except Exception as e:
+        logger.error(f"Failed to spawn restart process: {e}")
+        return
+
+    icon.stop()
+    cleanup_resources()
+
+
 def on_tray_exit(icon, item):
     """Handle exit from tray menu."""
     logger.info("Exit requested from tray menu")
@@ -608,6 +635,12 @@ def on_tray_healthcheck(icon, item):
     """Launch startup healthcheck in a separate console window."""
     logger.info("Launching startup healthcheck...")
     _launch_script_in_console('startup_healthcheck.py', ['--healthcheck-only'])
+
+
+def on_tray_diagnostics(icon, item):
+    """Launch diagnostic log analyzer in a separate console window."""
+    logger.info("Launching diagnostics tool...")
+    _launch_script_in_console('diagnostics.py')
 
 
 def _write_runtime_state(status, reason=None, details=None):
@@ -1026,7 +1059,7 @@ def _transcribe_and_emit_text(audio_data):
     _release_modifier_keys()
     # Add delay between keystrokes to prevent Claude Code crash
     # (Known bug: rapid text injection causes TUI crash)
-    keyboard.write(text, delay=0.01, restore_state_after=True)  # 10ms between characters
+    keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
     STATE.total_chars_typed += len(text)
 
 
@@ -1137,6 +1170,9 @@ def build_tray_menu():
         pystray.Menu.SEPARATOR,
         pystray.MenuItem('Run Startup Healthcheck...', on_tray_healthcheck),
         pystray.MenuItem('Calibrate Noise Gate...', on_tray_calibrate),
+        pystray.MenuItem('View Diagnostics...', on_tray_diagnostics),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem('Restart', on_tray_restart),
         pystray.MenuItem('Exit', on_tray_exit)
     )
 
@@ -1274,12 +1310,17 @@ def stream_health_watchdog():
     Checks every 5 seconds whether:
     1) Input device topology changed (dock/undock, plug/unplug)
     2) The stream is active and receiving callbacks
-    If unhealthy, attempts automatic recovery.
+    If unhealthy, attempts automatic recovery with exponential backoff.
     """
     logger.info("Stream health watchdog started")
 
+    WATCHDOG_POLL_S = 5
+    BACKOFF_MAX_S = 300  # 5 minutes
+    consecutive_failures = 0
+    next_retry_time = 0.0  # epoch time; 0 = retry immediately
+
     while not STATE.shutdown_event.is_set():
-        STATE.shutdown_event.wait(5)
+        STATE.shutdown_event.wait(WATCHDOG_POLL_S)
         if STATE.shutdown_event.is_set():
             break
 
@@ -1301,6 +1342,9 @@ def stream_health_watchdog():
             elif current_signature != STATE.last_device_topology_signature:
                 logger.info("Detected input device topology change. Re-resolving preferred microphone.")
                 STATE.last_device_topology_signature = current_signature
+                # Topology changed — reset backoff so recovery retries immediately
+                consecutive_failures = 0
+                next_retry_time = 0.0
                 previous_index = STATE.active_mic_index
                 if check_microphone():
                     if STATE.tray_icon:
@@ -1330,7 +1374,20 @@ def stream_health_watchdog():
             if STATE.active_mic_index is None and not check_microphone():
                 update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
                 continue
-            _reopen_audio_stream('stream missing')
+            # Respect backoff on consecutive failures
+            if time.time() < next_retry_time:
+                continue
+            if _reopen_audio_stream('stream missing'):
+                consecutive_failures = 0
+                next_retry_time = 0.0
+            else:
+                consecutive_failures += 1
+                backoff_s = min(WATCHDOG_POLL_S * (2 ** consecutive_failures), BACKOFF_MAX_S)
+                next_retry_time = time.time() + backoff_s
+                logger.warning(
+                    f"Recovery failed ({consecutive_failures} consecutive). "
+                    f"Next retry in {backoff_s}s"
+                )
             continue
 
         stream_active = manager.is_active
@@ -1342,7 +1399,17 @@ def stream_health_watchdog():
         if not stream_active or callback_stale:
             reason = "stream inactive" if not stream_active else "no callbacks for >10s"
             logger.error(f"Audio stream appears dead ({reason}). Attempting recovery...")
-            _reopen_audio_stream(reason)
+            if _reopen_audio_stream(reason):
+                consecutive_failures = 0
+                next_retry_time = 0.0
+            else:
+                consecutive_failures += 1
+                backoff_s = min(WATCHDOG_POLL_S * (2 ** consecutive_failures), BACKOFF_MAX_S)
+                next_retry_time = time.time() + backoff_s
+                logger.warning(
+                    f"Recovery failed ({consecutive_failures} consecutive). "
+                    f"Next retry in {backoff_s}s"
+                )
 
 
 def _heartbeat_loop():
@@ -1469,6 +1536,41 @@ def main():
         raise
 
 
+def _wait_for_pid_exit(pid, timeout_s=15):
+    """Block until *pid* is no longer running, or until *timeout_s* elapses."""
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    SYNCHRONIZE = 0x00100000
+    WAIT_OBJECT_0 = 0x00000000
+
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        # Process already gone or inaccessible
+        logger.info(f"PID {pid} already exited (OpenProcess returned 0)")
+        return
+
+    try:
+        timeout_ms = int(timeout_s * 1000)
+        result = kernel32.WaitForSingleObject(handle, timeout_ms)
+        if result == WAIT_OBJECT_0:
+            logger.info(f"PID {pid} exited cleanly")
+        else:
+            logger.warning(f"Timed out waiting for PID {pid} to exit (WaitForSingleObject={result})")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 if __name__ == '__main__':
+    # Handle restart: wait for the previous process to release the mutex
+    if '--restart-after-pid' in sys.argv:
+        idx = sys.argv.index('--restart-after-pid')
+        if idx + 1 < len(sys.argv):
+            try:
+                old_pid = int(sys.argv[idx + 1])
+                logger.info(f"Restart mode: waiting for PID {old_pid} to exit")
+                _wait_for_pid_exit(old_pid)
+            except ValueError:
+                logger.warning(f"Invalid PID value: {sys.argv[idx + 1]}")
+
     logger.info("Script entry point")
     main()
