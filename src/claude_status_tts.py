@@ -1,7 +1,7 @@
 """
 Claude Code Status Line with TTS Context Alerts
 
-Wraps ccstatusline and monitors context percentage.
+Wraps Oh My Posh (claude mode) and monitors context percentage.
 When context drops below threshold, speaks a warning using Edge TTS.
 
 Usage: Configure in ~/.claude/settings.json:
@@ -11,7 +11,10 @@ Usage: Configure in ~/.claude/settings.json:
     "padding": 0
   }
 
-Optional environment overrides:
+Optional environment override:
+  OMP_CLAUDE_CONFIG=path/to/theme.json  (custom Oh My Posh theme for Claude statusline)
+
+Compatibility environment overrides:
   CCSTATUSLINE_PACKAGE=ccstatusline@2.0.25  (must be version-pinned)
   CCSTATUSLINE_COMMAND="ccstatusline --compact"
 """
@@ -29,6 +32,10 @@ CRITICAL_THRESHOLD = 10  # Percentage for critical warning
 COOLDOWN_SECONDS = 120  # Don't repeat warning within this time
 
 SPEAK_SCRIPT = os.path.join(os.path.dirname(__file__), "speak.py")
+OMP_EXE = os.path.join(
+    os.environ.get('LOCALAPPDATA', ''),
+    'Programs', 'oh-my-posh', 'bin', 'oh-my-posh.exe'
+)
 CCSTATUSLINE_PACKAGE = os.environ.get('CCSTATUSLINE_PACKAGE', 'ccstatusline@2.0.25')
 
 # State tracking
@@ -72,6 +79,15 @@ def check_context_alert(remaining_pct):
             last_warn_time = current_time
 
 
+def build_omp_command():
+    """Return command tokens for launching oh-my-posh claude."""
+    cmd = [OMP_EXE, 'claude']
+    config = os.environ.get('OMP_CLAUDE_CONFIG')
+    if config:
+        cmd.extend(['--config', config])
+    return cmd
+
+
 _ALLOWED_COMMANDS = frozenset({
     'ccstatusline', 'ccstatusline.exe', 'ccstatusline.cmd',
     'npx', 'npx.exe', 'npx.cmd',
@@ -101,26 +117,25 @@ def build_ccstatusline_command():
 
 
 def main():
-    """Read status JSON from stdin, check for context alerts, pass through to ccstatusline."""
-    try:
-        ccstatusline_cmd = build_ccstatusline_command()
-    except ValueError as e:
-        print(f'[claude_status_tts] {e}', file=sys.stderr)
+    """Read status JSON from stdin, check for context alerts, pass through to oh-my-posh."""
+    omp_cmd = build_omp_command()
+    if not os.path.isfile(omp_cmd[0]):
+        print(f'[claude_status_tts] oh-my-posh not found at {omp_cmd[0]}', file=sys.stderr)
         sys.exit(2)
 
-    # Start ccstatusline as subprocess to handle actual display
-    ccstatusline = subprocess.Popen(
-        ccstatusline_cmd,
+    # Start oh-my-posh claude as subprocess to handle actual display
+    omp = subprocess.Popen(
+        omp_cmd,
         stdin=subprocess.PIPE,
         text=True
     )
 
     try:
         for line in sys.stdin:
-            # Pass through to ccstatusline for display
-            if ccstatusline.stdin:
-                ccstatusline.stdin.write(line)
-                ccstatusline.stdin.flush()
+            # Pass through to oh-my-posh for display
+            if omp.stdin:
+                omp.stdin.write(line)
+                omp.stdin.flush()
 
             # Parse and check for context alerts
             try:
@@ -133,9 +148,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if ccstatusline.stdin:
-            ccstatusline.stdin.close()
-        ccstatusline.wait()
+        if omp.stdin:
+            omp.stdin.close()
+        omp.wait()
 
 if __name__ == "__main__":
     main()
