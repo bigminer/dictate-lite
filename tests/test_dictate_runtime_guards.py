@@ -226,6 +226,26 @@ def test_processing_flag_clears_on_noise_gate_quiet_return():
     assert module.STATE.is_recording is False
 
 
+def test_noise_gate_allows_low_rms_with_strong_peaks():
+    module, mocked = _import_dictate_module({'NOISE_GATE_THRESHOLD': 0.1})
+    frame = np.zeros((3200, 1), dtype=np.float32)
+    frame[100, 0] = 0.4  # Low RMS, but clear speech-like peak above peak gate.
+    with module.STATE.lock:
+        module.STATE.is_recording = True
+        module.STATE.is_processing = False
+        module.STATE.recording_start_time = time.time() - 1
+        module.STATE.recorded_frames = [frame]
+    module.STATE.model = MagicMock()
+
+    with patch.object(module.transcription_io, 'transcribe_audio_array', return_value='peak speech') as transcribe_mock:
+        module.stop_recording_and_transcribe()
+
+    transcribe_mock.assert_called_once()
+    mocked['keyboard'].write.assert_called_once()
+    assert module.STATE.is_processing is False
+    assert module.STATE.is_recording is False
+
+
 def test_processing_flag_clears_on_transcription_exception():
     module, _ = _import_dictate_module()
     _prime_recording_state(module, samples=3200, amplitude=0.2)

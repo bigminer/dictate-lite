@@ -853,6 +853,7 @@ LOG_TRANSCRIPT_TEXT = _config_value('LOG_TRANSCRIPT_TEXT', False)
 LOG_LEVEL = _config_value('LOG_LEVEL', None)
 MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
 NOISE_GATE_THRESHOLD = _coerce_float_config(_config_value('NOISE_GATE_THRESHOLD', 0.01), 0.01)
+NOISE_GATE_PEAK_MULTIPLIER = _coerce_float_config(_config_value('NOISE_GATE_PEAK_MULTIPLIER', 3.0), 3.0)
 
 if _CONFIG is not None:
     logger.info(f"Loaded config: HOTKEY={HOTKEY}, MODEL={MODEL_SIZE}, DEVICE={DEVICE}, LANGUAGE={LANGUAGE}")
@@ -896,8 +897,14 @@ if not isinstance(MAX_TYPED_CHARS, int):
 if MAX_TYPED_CHARS < 1:
     MAX_TYPED_CHARS = 1
 
+if NOISE_GATE_PEAK_MULTIPLIER < 1.0:
+    NOISE_GATE_PEAK_MULTIPLIER = 1.0
+
 if NOISE_GATE_THRESHOLD > 0:
-    logger.info(f"Noise gate enabled (threshold={NOISE_GATE_THRESHOLD})")
+    logger.info(
+        f"Noise gate enabled (threshold={NOISE_GATE_THRESHOLD}, "
+        f"peak_multiplier={NOISE_GATE_PEAK_MULTIPLIER})"
+    )
 
 # Handle 'auto' language setting
 TRANSCRIBE_LANGUAGE = None if LANGUAGE == 'auto' else LANGUAGE
@@ -1045,10 +1052,20 @@ def _prepare_audio_for_transcription(recorded_frames):
     # Check noise gate threshold
     if NOISE_GATE_THRESHOLD > 0:
         power = float(np.mean(audio_data * audio_data))
+        rms = power ** 0.5
         if power < (NOISE_GATE_THRESHOLD * NOISE_GATE_THRESHOLD):
-            rms = power ** 0.5
-            logger.info(f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}), skipping")
-            return None
+            peak = float(np.max(np.abs(audio_data)))
+            peak_gate = NOISE_GATE_THRESHOLD * NOISE_GATE_PEAK_MULTIPLIER
+            if peak < peak_gate:
+                logger.info(
+                    f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}, "
+                    f"peak={peak:.4f} < {peak_gate:.4f}), skipping"
+                )
+                return None
+            logger.info(
+                f"Audio RMS below gate but peak indicates speech "
+                f"(RMS={rms:.4f}, peak={peak:.4f} >= {peak_gate:.4f}); continuing"
+            )
 
     # Apply noise reduction if enabled
     if NOISE_REDUCTION:
