@@ -186,7 +186,9 @@ The `keyboard` library used for hotkey detection installs a global keyboard hook
 
 ## Configuration
 
-After installation, edit `src/config.py` or re-run `install.bat`:
+After installation, edit `src/config.py` or re-run `install.bat`.
+`install.bat` writes the core keys; `dictate.py` also supports additional optional keys below.
+If an optional key is missing, runtime defaults are applied automatically.
 
 ```python
 HOTKEY = 'alt+f'          # Your recording hotkey
@@ -199,6 +201,8 @@ AUDIO_DEVICE_HOSTAPI = None  # Saved host API (auto-managed)
 AUDIO_DEVICE_INDEX = None    # Saved preferred index (auto-managed)
 AUDIO_DEVICE_UID = None      # Saved stable device fingerprint (auto-managed)
 NOISE_REDUCTION = False   # True to filter background noise
+NOISE_GATE_THRESHOLD = 0.01   # Base RMS gate threshold
+NOISE_GATE_PEAK_MULTIPLIER = 3.0  # Allow low-RMS clips if peaks indicate speech
 USE_CLIPBOARD = False     # Copy text to clipboard as backup (opt-in)
 LOG_TRANSCRIPT_TEXT = False  # Log transcript snippets (debug only)
 MAX_TYPED_CHARS = 1000    # Maximum characters typed per utterance
@@ -218,11 +222,31 @@ This primes the model to recognize these spellings correctly. Just list the word
 
 ## Files
 
-Architecture diagrams are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Detailed runtime and dependency architecture diagrams are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+```text
+voice-dictation/
+|-- src/                # application modules
+|   |-- voice_dictation/   # internal split modules (recording/watchdogs)
+|-- tests/              # pytest suites
+|-- install.bat
+|-- start-dictation.bat
+|-- test-install.bat
+|-- launch.cmd
+|-- uninstall.bat
+|-- README.md
+|-- ARCHITECTURE.md
+|-- TESTING-PLAN.md
+```
 
 | File | Purpose |
 |------|---------|
-| `src/dictate.py` | Main application - system tray, hotkey, transcription |
+| `src/dictate.py` | Main orchestration + compatibility facade (tray/hotkey/runtime wiring) |
+| `src/voice_dictation/recording_pipeline.py` | Extracted recording/transcription preparation pipeline helpers |
+| `src/voice_dictation/watchdog_loops.py` | Extracted recording and stream watchdog/recovery loops |
+| `src/diagnostics.py` | Diagnostic log and runtime-state analyzer |
+| `src/startup_healthcheck.py` | Operational preflight + spoken phrase verification |
+| `src/calibrate.py` | Noise gate calibration workflow |
 | `src/audio_device_identity.py` | Shared microphone identity, UID, and fallback resolution helpers |
 | `src/runtime_state.py` | Shared runtime state read/write helpers (`%LOCALAPPDATA%\VoiceDictation\state.json`) |
 | `src/app_state.py` | Dataclass-backed runtime state container for dictation lifecycle |
@@ -231,18 +255,21 @@ Architecture diagrams are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | `src/transcription_io.py` | Shared temporary WAV transcription pipeline for Whisper |
 | `src/config_store.py` | Structured `config.py` read/update helpers with atomic writes |
 | `src/speak.py` | Text-to-speech utility (see below) |
+| `src/claude_status_tts.py` | Claude statusline helper (not part of dictation runtime) |
 | `src/config.py` | Your settings (generated) |
 | `src/config.example.py` | Configuration template |
 | `install.bat` | Setup wizard (safe to re-run) |
 | `uninstall.bat` | Remove installation |
 | `start-dictation.bat` | Launch the tool |
-| `src/startup_healthcheck.py` | Operational preflight + spoken phrase verification |
-| `launch.cmd` | Headless launcher with logging |
+| `launch.cmd` | Minimal headless launcher (starts `pythonw` directly, no startup healthcheck prompt) |
 | `test-install.bat` | Verify installation |
 
 ### Tests
 
 - `tests/test_dictate.py` - core tray/hotkey/transcription behavior
+- `tests/test_dictate_runtime_guards.py` - runtime race/restart/guard regression coverage
+- `tests/test_startup_healthcheck.py` - startup healthcheck behavioral flow
+- `tests/test_diagnostics.py` - diagnostics parsing/aggregation/report output
 - `tests/test_calibrate.py` - calibration and fallback behavior
 - `tests/test_audio_device_identity.py` - shared device identity and resolution logic
 - `tests/test_runtime_state.py` - shared runtime state persistence helpers
@@ -251,6 +278,7 @@ Architecture diagrams are documented in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 - `tests/test_audio_capture.py` - shared capture/probe helpers
 - `tests/test_transcription_io.py` - temporary WAV transcription helper behavior
 - `tests/test_app_state.py` - runtime state container defaults
+- `tests/test_claude_status_tts.py` - command hardening for Claude statusline helper
 
 ### speak.py - Text-to-Speech Utility
 

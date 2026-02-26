@@ -1,9 +1,61 @@
 # Voice Dictation Architecture (Agent-Oriented, ASCII)
 
 This document is optimized for LLM/code-agent understanding and safe change planning.
-It is ASCII-first on purpose.
+All diagrams are ASCII.
 
-## 1) Runtime Topology (System-Level)
+## 1) Repository File Structure (Current)
+
+```text
+voice-dictation/
+|-- src/
+|   |-- dictate.py                 # Runtime orchestrator + compatibility facade
+|   |-- voice_dictation/
+|   |   |-- recording_pipeline.py  # Extracted recording/transcription prep helpers
+|   |   |-- watchdog_loops.py      # Extracted recording + stream watchdog loops
+|   |-- startup_healthcheck.py     # Startup/on-demand operational check
+|   |-- calibrate.py               # Noise gate calibration workflow
+|   |-- diagnostics.py             # Log + state analyzer
+|   |-- audio_device_identity.py   # Device identity/UID + fallback resolution
+|   |-- audio_stream_manager.py    # Stream open/close/switch/reopen abstraction
+|   |-- audio_capture.py           # Stream probe + fixed duration capture helpers
+|   |-- transcription_io.py        # Model load/transcription/sanitize helpers
+|   |-- runtime_state.py           # %LOCALAPPDATA% state.json read/write
+|   |-- app_state.py               # In-memory state container (DictationAppState)
+|   |-- config_store.py            # Structured config.py update helpers
+|   |-- config.example.py          # Template defaults
+|   |-- config.py                  # Generated machine-local config (runtime input)
+|   |-- create_icon.py             # Icon helper
+|   |-- speak.py                   # TTS helper
+|   |-- claude_status_tts.py       # Claude statusline/TTS helper (separate from dictation runtime)
+|
+|-- tests/
+|   |-- test_dictate.py
+|   |-- test_dictate_runtime_guards.py
+|   |-- test_startup_healthcheck.py
+|   |-- test_calibrate.py
+|   |-- test_diagnostics.py
+|   |-- test_audio_device_identity.py
+|   |-- test_audio_stream_manager.py
+|   |-- test_audio_capture.py
+|   |-- test_transcription_io.py
+|   |-- test_runtime_state.py
+|   |-- test_config_store.py
+|   |-- test_app_state.py
+|   |-- test_claude_status_tts.py
+|   |-- conftest.py
+|
+|-- install.bat
+|-- start-dictation.bat
+|-- test-install.bat
+|-- launch.cmd
+|-- uninstall.bat
+|-- README.md
+|-- TESTING-PLAN.md
+|-- AGENTS.md
+|-- ARCHITECTURE.md
+```
+
+## 2) Runtime Topology (System-Level)
 
 ```text
 User
@@ -11,39 +63,66 @@ User
   v
 start-dictation.bat
   |
-  +--> startup_healthcheck.py --(probe/capture/transcribe check)--> sounddevice + faster-whisper
-  |         |
-  |         +--> reads src/config.py
-  |         +--> reads %LOCALAPPDATA%\VoiceDictation\state.json
+  +--> python src/startup_healthcheck.py --healthcheck-only
+  |       |
+  |       +--> sounddevice InputStream probe/capture
+  |       +--> faster-whisper transcription check
+  |       +--> reads src/config.py
+  |       +--> reads %LOCALAPPDATA%\VoiceDictation\state.json
   |
-  +--> (if allowed) pythonw src/dictate.py
-            |
-            +--> pystray (tray icon/menu)
-            +--> keyboard (global hotkey + text injection)
-            +--> sounddevice InputStream (live mic callback)
-            +--> faster-whisper (transcription)
-            +--> src/config.py (device identity persistence)
-            +--> %LOCALAPPDATA%\VoiceDictation\state.json (runtime lifecycle)
-            +--> %USERPROFILE%\voice-dictation\dictation.log (rotating logs)
+  +--> start pythonw src/dictate.py
+          |
+          +--> pystray (tray icon + menu)
+          +--> keyboard (global hotkey + text injection)
+          +--> sounddevice InputStream (live callback)
+          +--> faster-whisper (transcription)
+          +--> reads/writes src/config.py (device identity)
+          +--> writes %LOCALAPPDATA%\VoiceDictation\state.json (lifecycle/status)
+          +--> writes %USERPROFILE%\voice-dictation\dictation.log (rotating logs)
 ```
 
-## 2) Source Layout and Ownership
+## 3) Core Responsibility Map
 
 ```text
-src/dictate.py               = Main orchestrator; tray/hotkey/state/stream/model lifecycle.
-src/startup_healthcheck.py   = Pre-launch operational check and phrase verification.
-src/calibrate.py             = Noise gate calibration; updates NOISE_GATE_THRESHOLD.
+dictate.py:
+  Process lifecycle, singleton guard, tray UI, hotkey loop,
+  live stream callback, restart handoff, runtime state updates,
+  and wrappers around extracted pipeline/watchdog modules.
 
-src/audio_device_identity.py = Source of truth for mic UID + resolution fallback chain.
-src/audio_stream_manager.py  = Stream open/close/switch/reopen abstraction.
-src/app_state.py             = DictationAppState dataclass + lock + shutdown event.
-src/audio_capture.py         = Probe/capture helpers (deterministic stream reads).
-src/transcription_io.py      = Whisper load + temp WAV transcription + text sanitize.
-src/runtime_state.py         = Atomic read/write for %LOCALAPPDATA%\VoiceDictation\state.json.
-src/config_store.py          = Atomic read/update of src/config.py assignments.
+voice_dictation/recording_pipeline.py:
+  Recording -> processing transition, audio validation/gating,
+  and transcription/sanitization timing payload generation.
+
+voice_dictation/watchdog_loops.py:
+  Recording watchdog loop, microphone self-test, stream reopen helper,
+  and stream health watchdog loop with exponential backoff.
+
+startup_healthcheck.py:
+  Pre-launch mic + transcription verification and guided user check.
+
+calibrate.py:
+  Ambient/speech sampling and NOISE_GATE_THRESHOLD update.
+
+diagnostics.py:
+  Parse/aggregate logs + runtime state into incident-friendly report.
+
+audio_device_identity.py:
+  Canonical input device normalization, UID generation, and resolution chain.
+
+audio_stream_manager.py:
+  Safe stream lifecycle transitions for open/switch/reopen/close.
+
+audio_capture.py:
+  Deterministic stream probe/capture helpers using blocking reads.
+
+transcription_io.py:
+  Whisper load/transcribe wrapper and transcript sanitization.
+
+runtime_state.py + app_state.py:
+  Persistent state.json + in-memory runtime state container.
 ```
 
-## 3) Import-Level Dependency Map
+## 4) Import Dependency Map
 
 ```text
 dictate.py
@@ -52,8 +131,10 @@ dictate.py
   -> transcription_io
   -> runtime_state
   -> config_store
-  -> audio_stream_manager
   -> app_state
+  -> audio_stream_manager
+  -> voice_dictation.recording_pipeline
+  -> voice_dictation.watchdog_loops
 
 startup_healthcheck.py
   -> audio_device_identity
@@ -63,137 +144,146 @@ startup_healthcheck.py
 
 calibrate.py
   -> audio_device_identity
+  -> audio_capture
   -> config_store
+
+diagnostics.py
+  -> runtime_state
 ```
 
-## 4) Main Runtime Flow (Dictation)
+## 5) Main Runtime Flow (Dictation)
+
+### Startup
 
 ```text
 main()
   -> check_single_instance()
   -> write runtime_state = starting
-  -> create tray icon (gray) [if pystray available]
-  -> background init_audio_and_dictation()
+  -> create tray icon (gray)
+  -> init_audio_and_dictation() on background thread
 
 init_audio_and_dictation()
-  -> check_microphone() [device resolve fallback chain]
-  -> load_model() [Whisper]
-  -> open audio stream via AudioStreamManager
-  -> set tray ready (green), write runtime_state = ready
+  -> check_microphone() via audio_device_identity resolution chain
+  -> load_model()
+  -> open stream via AudioStreamManager.open()
+  -> write runtime_state = ready
   -> start stream_health_watchdog thread
-  -> run_dictation_loop() [register hotkeys + wait]
+  -> register hotkeys + run main wait loop
 ```
 
-### Hotkey Dictation Pipeline
+### Recording and Transcription Pipeline
 
 ```text
-hotkey press
+Hotkey press
   -> start_recording()
-     - guard: not already recording
-     - guard: not currently processing
-     - set STATE.is_recording = True
-     - tray = red
+     -> set STATE.is_recording = True
+     -> tray red
 
 audio_callback()
-  -> if recording:
-       append frames
-       update silence flag
+  -> append frames while recording
+  -> update last_callback_time
+  -> update silence_flag
 
-hotkey release (or watchdog fallback)
+Hotkey release (or fallback watchdog detects key up)
   -> stop_recording_and_transcribe()
-     - transition recording -> processing
-     - tray = yellow
-     - _prepare_audio_for_transcription()
-         * concat frames
-         * min duration gate
-         * noise gate threshold
-         * optional noisereduce
-     - _transcribe_and_emit_text()
-         * transcription_io.transcribe_audio_array()
-         * transcription_io.sanitize_transcript_text()
-         * optional clipboard copy
-         * keyboard.write() into active app
-     - finish_processing_cycle()
-         * STATE.is_processing = False
-         * tray = green
+      -> set processing state + tray yellow
+      -> voice_dictation.recording_pipeline.prepare_audio_for_transcription()
+         - concatenate frames
+         - duration gate
+         - noise gate: RMS + peak-aware check
+         - optional noise reduction
+      -> voice_dictation.recording_pipeline.transcribe_audio()
+         - faster-whisper transcribe
+         - sanitize text
+      -> _transcribe_and_emit_text()
+         - optional clipboard copy
+         - keyboard.write()
+      -> finish -> tray green
 ```
 
-## 5) Device Resolution and Recovery Logic
+## 6) Restart Handoff Flow
 
-### Resolution Order (single source of truth in `audio_device_identity.py`)
+```text
+Tray menu -> Restart
+  -> on_tray_restart()
+     -> spawn new process: pythonw dictate.py --restart-after-pid <old_pid>
+     -> cleanup_resources(status=restarting, reason=tray_restart_requested)
+     -> old process exits
+
+New process startup
+  -> sees --restart-after-pid
+  -> waits for old PID exit
+  -> retries singleton mutex acquisition for bounded window
+  -> proceeds through normal startup
+```
+
+## 7) Device Resolution and Recovery
+
+### Resolution Order
 
 ```text
 resolve_preferred_input_device(...)
-  1. saved UID
-  2. saved name (+ preferred host API/index tie-break)
-  3. legacy saved numeric index
-  4. system default input index
-  5. first available input device
-  6. none (failure)
+  1) Saved UID
+  2) Saved name + host API/index tie-breakers
+  3) Legacy numeric index
+  4) System default input index
+  5) First available input device
+  6) Failure
 ```
 
-### Recovery Loop
+### Watchdog Recovery Loop
 
 ```text
-stream_health_watchdog (every 5s, unless pipeline busy)
-  -> detect device topology signature changes
-  -> if changed:
-       re-resolve preferred mic
-       reopen stream if needed
+stream_health_watchdog wrapper
+  -> voice_dictation.watchdog_loops.run_stream_health_watchdog(...)
+  -> detect input topology signature changes
+  -> re-resolve preferred mic on topology change
   -> if stream missing/inactive/stale callbacks:
-       _reopen_audio_stream(reason)
-  -> on failure:
-       tray gray + runtime_state audio_error
+       voice_dictation.watchdog_loops.reopen_audio_stream(...)
+  -> on repeated failures:
+       exponential backoff + runtime_state audio_error
 ```
 
-## 6) State Model (Operational)
+## 8) State Model
 
-### In-Memory Process State (`DictationAppState`)
+### In-Memory (`DictationAppState`)
 
 ```text
-audio/recording fields:
+Audio pipeline:
+  is_recording, is_processing, recorded_frames, recording_start_time,
+  silence_flag, last_callback_time, audio_stream
+
+Device identity:
   active_mic_name, active_mic_index, active_mic_hostapi
-  audio_stream
-  is_recording
-  is_processing
-  recorded_frames
-  recording_start_time
-  last_callback_time
-  silence_flag
 
-service/control fields:
-  model
-  tray_icon, tray_color, tray_title
-  shutdown_event
-  lock (RLock, coarse-grained)
+Service:
+  model, tray_icon, tray_color, tray_title, shutdown_event, lock
 ```
 
-### Persisted Runtime State (`%LOCALAPPDATA%\VoiceDictation\state.json`)
+### Persistent (`%LOCALAPPDATA%\VoiceDictation\state.json`)
 
 ```text
-write_runtime_state(status, reason?, details?, pid?)
-  keys:
-    status
-    updated_at (UTC ISO-8601 Z)
-    pid
-    reason (optional)
-    details (optional)
+{
+  "status": "...",
+  "updated_at": "...Z",
+  "pid": 12345,
+  "reason": "...",         # optional
+  "details": { ... }       # optional
+}
 ```
 
-### Lifecycle State Machine (simplified)
+Lifecycle values in practice:
 
 ```text
 starting -> ready
-starting -> audio_error
-ready -> recording
-recording -> processing
-processing -> ready
-ready -> audio_error
-audio_error -> ready           (successful recovery/reopen)
-any -> shutdown_clean          (cleanup_resources)
+ready -> heartbeat
+ready/heartbeat -> recording -> processing -> ready
+ready/heartbeat -> audio_error
+ready/heartbeat -> restarting
+any -> shutdown_clean
 ```
 
-## 7) Side Effects Map (Critical for Safe Edits)
+## 9) Side Effects and Persistence Boundaries
 
 ```text
 Writes src/config.py:
@@ -201,83 +291,54 @@ Writes src/config.py:
   - calibrate.py::update_config()
   - via config_store.update_config_values()
 
-Writes runtime state JSON:
+Writes runtime state:
   - dictate.py::_write_runtime_state()
-  - startup_healthcheck.py reads only
-  - via runtime_state.write_runtime_state()
+  - runtime_state.write_runtime_state()
 
 Writes logs:
   - dictate.py logging setup (RotatingFileHandler)
+  - file: %USERPROFILE%\voice-dictation\dictation.log
 
-Emits user-visible output:
-  - tray icon/title updates (dictate.py)
-  - keyboard text injection to active window (dictate.py)
-  - optional clipboard write (dictate.py)
-```
-
-## 8) Concurrency and Guardrails
-
-```text
-STATE.lock:
-  - protects recording/processing flags and frame list transitions.
-
-_switch_lock:
-  - serializes stream switch/reopen operations to avoid concurrent stream mutation.
-
-background threads:
-  - recording watchdog: release fallback + timeout + silence warning.
-  - stream health watchdog: topology and stream liveness recovery.
-
-rule:
-  - do not switch/reopen stream while recording or processing.
-```
-
-## 9) Compatibility Constraints for Refactors
-
-```text
-dictate.py contains wrapper helpers delegating to audio_device_identity.
-These wrappers exist to preserve existing call sites/tests.
-
-When changing device identity behavior:
-  - keep behavior aligned across dictate.py, startup_healthcheck.py, calibrate.py
-  - update tests:
-      tests/test_audio_device_identity.py
-      tests/test_dictate.py
-      tests/test_startup_healthcheck.py
-      tests/test_calibrate.py
+External user-visible actions:
+  - tray icon/title updates
+  - keyboard text injection into active window
+  - optional clipboard writes
 ```
 
 ## 10) Test Coverage Map (Architecture-Relevant)
 
 ```text
-tests/test_dictate.py                  = tray/hotkey/transcription runtime behavior
-tests/test_dictate_runtime_guards.py   = runtime guard and safety behavior
-tests/test_audio_device_identity.py    = UID + resolution chain
-tests/test_audio_stream_manager.py     = stream lifecycle abstraction
-tests/test_audio_capture.py            = probe/capture helpers
-tests/test_transcription_io.py         = model I/O + text sanitize
-tests/test_runtime_state.py            = state persistence
-tests/test_config_store.py             = config upsert/atomic write
-tests/test_startup_healthcheck.py      = startup verification flow
-tests/test_calibrate.py                = calibration behavior
-tests/test_app_state.py                = state defaults/container integrity
+tests/test_dictate_runtime_guards.py   -> restart, race, processing guard regressions
+tests/test_dictate.py                  -> broad behavior + source-level guard checks
+tests/test_diagnostics.py              -> log parsing/aggregation/reporting
+tests/test_startup_healthcheck.py      -> preflight phrase flow
+tests/test_calibrate.py                -> calibration and threshold logic checks
+tests/test_audio_device_identity.py    -> identity + fallback resolution
+tests/test_audio_stream_manager.py     -> stream lifecycle abstraction
+tests/test_audio_capture.py            -> probe/capture helpers
+tests/test_transcription_io.py         -> transcript sanitize/transcribe wrappers
+tests/test_runtime_state.py            -> persistent state read/write semantics
+tests/test_config_store.py             -> config assignment updates
+tests/test_app_state.py                -> app state defaults
 ```
 
 ## 11) Fast Navigation for Agents
 
 ```text
-Need to change typing/output behavior:
-  -> dictate.py::_transcribe_and_emit_text()
+Need to debug "red but no transcription":
+  -> dictate.py::_prepare_audio_for_transcription()
+  -> check noise-gate logs in dictation.log
 
-Need to change stream open/switch/recover behavior:
+Need to debug restart/handoff:
+  -> dictate.py::on_tray_restart()
+  -> dictate.py::check_single_instance()
+  -> state.json reason/status transitions
+
+Need to debug device switching:
+  -> audio_device_identity.py
   -> audio_stream_manager.py
-  -> dictate.py::switch_audio_device()
-  -> dictate.py::_reopen_audio_stream()
   -> dictate.py::stream_health_watchdog()
 
-Need to change device matching/fallback:
-  -> audio_device_identity.py (single source of truth)
-
-Need to change persistence behavior:
-  -> runtime_state.py / config_store.py
+Need to debug startup preflight:
+  -> startup_healthcheck.py
 ```

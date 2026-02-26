@@ -22,6 +22,7 @@ import runtime_state
 import transcription_io
 from app_state import DictationAppState
 from audio_stream_manager import AudioStreamManager
+from voice_dictation import recording_pipeline, watchdog_loops
 
 # Set up logging FIRST before any other imports that might fail
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'voice-dictation')
@@ -923,6 +924,7 @@ RECORDING_TITLE = 'Voice Dictation - Recording...'
 PROCESSING_TITLE = 'Voice Dictation - Processing...'
 RECORDING_MUTED_WARNING_TITLE = 'Recording - Warning: mic may be muted'
 READY_MUTED_WARNING_TITLE = f'{READY_TITLE} (Warning: mic may be muted)'
+RECORDING_RELEASE_FALLBACK_LOG = 'Recording stop fallback triggered: hotkey no longer pressed'
 
 MODIFIER_KEYS = (
     'alt', 'left alt', 'right alt',
@@ -1017,92 +1019,38 @@ def start_recording():
 
 def _begin_processing_from_recording():
     """Transition recording -> processing and return captured frames."""
-    with STATE.lock:
-        if not STATE.is_recording:
-            return None
-        STATE.is_recording = False
-        if STATE.is_processing:
-            logger.debug("stop_recording ignored: transcription already in progress")
-            return None
-        STATE.is_processing = True
-        recorded_frames = STATE.recorded_frames
-        STATE.recorded_frames = []
-    return recorded_frames
+    return recording_pipeline.begin_processing_from_recording(STATE, logger)
 
 
 def _prepare_audio_for_transcription(recorded_frames):
     """Validate and normalize captured frames for transcription."""
-    if not recorded_frames:
-        logger.info("No audio captured")
-        return None
-
-    # Combine recorded audio with corruption guard
-    try:
-        audio_data = np.concatenate(recorded_frames, axis=0)
-    except (ValueError, TypeError) as e:
-        logger.error(f"Failed to concatenate audio frames (corrupt data?): {e}")
-        return None
-
-    # Check minimum duration (< 0.1s is too short to transcribe)
-    duration_s = len(audio_data) / SAMPLE_RATE
-    if duration_s < 0.1:
-        logger.info(f"Audio too short ({duration_s:.3f}s < 0.1s), skipping transcription")
-        return None
-
-    # Check noise gate threshold
-    if NOISE_GATE_THRESHOLD > 0:
-        power = float(np.mean(audio_data * audio_data))
-        rms = power ** 0.5
-        if power < (NOISE_GATE_THRESHOLD * NOISE_GATE_THRESHOLD):
-            peak = float(np.max(np.abs(audio_data)))
-            peak_gate = NOISE_GATE_THRESHOLD * NOISE_GATE_PEAK_MULTIPLIER
-            if peak < peak_gate:
-                logger.info(
-                    f"Audio too quiet (RMS={rms:.4f} < {NOISE_GATE_THRESHOLD}, "
-                    f"peak={peak:.4f} < {peak_gate:.4f}), skipping"
-                )
-                return None
-            logger.info(
-                f"Audio RMS below gate but peak indicates speech "
-                f"(RMS={rms:.4f}, peak={peak:.4f} >= {peak_gate:.4f}); continuing"
-            )
-
-    # Apply noise reduction if enabled
-    if NOISE_REDUCTION:
-        logger.debug("Applying noise reduction...")
-        # Use ravel() to avoid unnecessary copy when data is already contiguous.
-        audio_data = nr.reduce_noise(y=np.ravel(audio_data), sr=SAMPLE_RATE)
-    return audio_data
+    return recording_pipeline.prepare_audio_for_transcription(
+        recorded_frames,
+        np_module=np,
+        sample_rate=SAMPLE_RATE,
+        noise_gate_threshold=NOISE_GATE_THRESHOLD,
+        noise_gate_peak_multiplier=NOISE_GATE_PEAK_MULTIPLIER,
+        noise_reduction=NOISE_REDUCTION,
+        noise_reducer_module=nr if NOISEREDUCE_AVAILABLE else None,
+        logger=logger,
+    )
 
 
 def _transcribe_and_emit_text(audio_data):
     """Run Whisper transcription then emit text to clipboard/active window."""
-    transcribe_opts = {
-        'beam_size': 5,
-        'language': TRANSCRIBE_LANGUAGE,
-    }
-    if VOCABULARY:
-        transcribe_opts['initial_prompt'] = VOCABULARY
-    t0 = time.perf_counter()
-    raw_text = transcription_io.transcribe_audio_array(
-        STATE.model,
+    result = recording_pipeline.transcribe_audio(
         audio_data,
-        **transcribe_opts,
+        model=STATE.model,
+        transcription_io_module=transcription_io,
+        sample_rate=SAMPLE_RATE,
+        transcribe_language=TRANSCRIBE_LANGUAGE,
+        vocabulary=VOCABULARY,
+        max_typed_chars=MAX_TYPED_CHARS,
+        logger=logger,
     )
-    transcription_ms = (time.perf_counter() - t0) * 1000
-    text = transcription_io.sanitize_transcript_text(raw_text)
-    if len(text) > MAX_TYPED_CHARS:
-        logger.warning(
-            f"Transcript length {len(text)} exceeds MAX_TYPED_CHARS={MAX_TYPED_CHARS}; truncating output"
-        )
-        text = text[:MAX_TYPED_CHARS].rstrip()
-
-    audio_duration_s = len(audio_data) / SAMPLE_RATE
-    logger.info("Transcription complete", extra={
-        "transcription_ms": round(transcription_ms, 1),
-        "audio_s": round(audio_duration_s, 2),
-        "text_len": len(text) if text else 0,
-    })
+    raw_text = result['raw_text']
+    text = result['text']
+    transcription_ms = result['transcription_ms']
 
     if not text:
         logger.info("No speech detected")
@@ -1266,37 +1214,25 @@ def run_dictation_loop():
 
 def _recording_state_watchdog():
     """Monitor timeout/silence and fallback key-release detection while recording."""
-    silence_warned = False
-    while not STATE.shutdown_event.is_set():
-        is_recording, recording_start_time, silence_flag = _recording_snapshot()
+    def _hotkey_pressed_for_watchdog():
+        if not _is_hotkey_currently_pressed():
+            return False
+        return True
 
-        if is_recording and recording_start_time > 0:
-            if not _is_hotkey_currently_pressed():
-                logger.info("Recording stop fallback triggered: hotkey no longer pressed")
-                silence_warned = False
-                stop_recording_and_transcribe()
-                STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
-                continue
-
-            elapsed = time.time() - recording_start_time
-            if elapsed > MAX_RECORDING_SECONDS:
-                logger.warning(f"Recording timeout after {MAX_RECORDING_SECONDS}s - force stopping")
-                silence_warned = False
-                stop_recording_and_transcribe()
-                STATE.shutdown_event.wait(RECORDING_MONITOR_INTERVAL)
-                continue
-
-            if silence_flag and not silence_warned:
-                silence_warned = True
-                _set_recording_icon(RECORDING_MUTED_WARNING_TITLE)
-            elif not silence_flag and silence_warned:
-                silence_warned = False
-                _set_recording_icon()
-        else:
-            silence_warned = False
-
-        wait_seconds = RECORDING_MONITOR_INTERVAL if is_recording else IDLE_RECORDING_MONITOR_INTERVAL
-        STATE.shutdown_event.wait(wait_seconds)
+    watchdog_loops.run_recording_state_watchdog(
+        state=STATE,
+        shutdown_event=STATE.shutdown_event,
+        get_recording_snapshot=_recording_snapshot,
+        is_hotkey_currently_pressed=_hotkey_pressed_for_watchdog,
+        stop_recording_and_transcribe=stop_recording_and_transcribe,
+        set_recording_icon=_set_recording_icon,
+        recording_muted_warning_title=RECORDING_MUTED_WARNING_TITLE,
+        recording_monitor_interval=RECORDING_MONITOR_INTERVAL,
+        idle_recording_monitor_interval=IDLE_RECORDING_MONITOR_INTERVAL,
+        max_recording_seconds=MAX_RECORDING_SECONDS,
+        release_fallback_message=RECORDING_RELEASE_FALLBACK_LOG,
+        logger=logger,
+    )
 
 
 def test_microphone():
@@ -1305,73 +1241,32 @@ def test_microphone():
     Must be called after the main stream is started.
     """
     manager = _get_stream_manager()
-    if not manager.is_active:
-        logger.warning("test_microphone: audio stream not active, skipping test")
-        return
-
-    logger.info("Running microphone self-test (0.5s capture)...")
-
-    try:
-        test_device = _get_active_stream_device()
-        test_audio = audio_capture.capture_from_stream(
-            sd,
-            device_index=test_device,
-            seconds=0.5,
-            sample_rate=SAMPLE_RATE,
-            channels=1,
-            dtype='float32',
-            blocksize=1024,
-            logger=logger,
-        )
-    except Exception as e:
-        logger.warning(f"Microphone self-test failed to capture audio: {e}")
-        return
-
-    if test_audio.size == 0:
-        logger.warning("Microphone self-test: no frames captured")
-        return
-
-    try:
-        rms = np.sqrt(np.mean(test_audio ** 2))
-    except Exception as e:
-        logger.warning(f"Microphone self-test: error computing RMS: {e}")
-        return
-
-    if rms < 1e-6:
-        logger.warning(f"Microphone self-test: RMS={rms:.8f} - mic may be muted or disconnected")
-        _set_ready_icon(READY_MUTED_WARNING_TITLE)
-    else:
-        logger.info(f"Microphone self-test passed (RMS={rms:.6f})")
+    watchdog_loops.run_microphone_self_test(
+        manager=manager,
+        get_active_stream_device=_get_active_stream_device,
+        capture_from_stream_fn=audio_capture.capture_from_stream,
+        sd_module=sd,
+        sample_rate=SAMPLE_RATE,
+        np_module=np,
+        logger=logger,
+        set_ready_icon=_set_ready_icon,
+        ready_muted_warning_title=READY_MUTED_WARNING_TITLE,
+    )
 
 
 def _reopen_audio_stream(recovery_reason):
     """Try to reopen the current stream target. Returns True on success."""
-    if not _switch_lock.acquire(blocking=False):
-        logger.info(f"Skipping stream recovery ({recovery_reason}): switch already in progress")
-        return False
-
-    update_tray_icon('gray', f'Voice Dictation - Recovering audio ({recovery_reason})')
-
-    try:
-        device_to_open = _get_active_stream_device()
-        manager = _get_stream_manager()
-        manager.reopen(device_to_open)
-        STATE.audio_stream = manager.stream
-        STATE.last_callback_time = time.time()
-        logger.info(
-            f"Audio stream recovered successfully ({recovery_reason}) on open_arg={device_to_open}"
-        )
-        if STATE.model is not None:
-            _set_ready_icon()
-        _write_runtime_state('ready', reason=f'recovered:{recovery_reason}')
-        return True
-    except Exception as e:
-        logger.error(f"Failed to recover audio stream ({recovery_reason}): {e}")
-        update_tray_icon('gray', 'Voice Dictation - Audio error (see log)')
-        _write_runtime_state('audio_error', reason=f'recovery_failed:{recovery_reason}', details=str(e))
-        return False
-    finally:
-        _switch_lock.release()
+    return watchdog_loops.reopen_audio_stream(
+        recovery_reason=recovery_reason,
+        switch_lock=_switch_lock,
+        update_tray_icon=update_tray_icon,
+        get_active_stream_device=_get_active_stream_device,
+        get_stream_manager=_get_stream_manager,
+        state=STATE,
+        logger=logger,
+        set_ready_icon=_set_ready_icon,
+        write_runtime_state=_write_runtime_state,
+    )
 
 
 def stream_health_watchdog():
@@ -1381,104 +1276,19 @@ def stream_health_watchdog():
     2) The stream is active and receiving callbacks
     If unhealthy, attempts automatic recovery with exponential backoff.
     """
-    logger.info("Stream health watchdog started")
-
-    WATCHDOG_POLL_S = 5
-    BACKOFF_MAX_S = 300  # 5 minutes
-    consecutive_failures = 0
-    next_retry_time = 0.0  # epoch time; 0 = retry immediately
-
-    while not STATE.shutdown_event.is_set():
-        STATE.shutdown_event.wait(WATCHDOG_POLL_S)
-        if STATE.shutdown_event.is_set():
-            break
-
-        # Don't interfere while actively recording.
-        if _is_audio_pipeline_busy():
-            continue
-
-        # Detect device topology changes (dock/undock, device add/remove).
-        try:
-            input_devices = _enumerate_input_devices()
-        except Exception as e:
-            logger.warning(f"Failed to enumerate devices in watchdog: {e}")
-            input_devices = []
-
-        if input_devices:
-            current_signature = _current_input_topology_signature(input_devices)
-            if STATE.last_device_topology_signature is None:
-                STATE.last_device_topology_signature = current_signature
-            elif current_signature != STATE.last_device_topology_signature:
-                logger.info("Detected input device topology change. Re-resolving preferred microphone.")
-                STATE.last_device_topology_signature = current_signature
-                # Topology changed — reset backoff so recovery retries immediately
-                consecutive_failures = 0
-                next_retry_time = 0.0
-                previous_index = STATE.active_mic_index
-                if check_microphone():
-                    if STATE.tray_icon:
-                        STATE.tray_icon.update_menu()
-                    if STATE.audio_stream is None or STATE.active_mic_index != previous_index:
-                        _reopen_audio_stream('device topology change')
-                else:
-                    logger.warning("No usable microphone after topology change")
-                    update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
-                    _write_runtime_state('audio_error', reason='no_microphone_after_topology_change')
-                    _get_stream_manager().close()
-                    STATE.audio_stream = None
-                continue
-        else:
-            if STATE.last_device_topology_signature not in (None, ()):
-                logger.warning("No input devices currently available")
-            STATE.last_device_topology_signature = ()
-            update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
-            _write_runtime_state('audio_error', reason='no_input_devices')
-            _get_stream_manager().close()
-            STATE.audio_stream = None
-            continue
-
-        # Recover missing stream when devices exist.
-        manager = _get_stream_manager()
-        if manager.stream is None:
-            if STATE.active_mic_index is None and not check_microphone():
-                update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
-                continue
-            # Respect backoff on consecutive failures
-            if time.time() < next_retry_time:
-                continue
-            if _reopen_audio_stream('stream missing'):
-                consecutive_failures = 0
-                next_retry_time = 0.0
-            else:
-                consecutive_failures += 1
-                backoff_s = min(WATCHDOG_POLL_S * (2 ** consecutive_failures), BACKOFF_MAX_S)
-                next_retry_time = time.time() + backoff_s
-                logger.warning(
-                    f"Recovery failed ({consecutive_failures} consecutive). "
-                    f"Next retry in {backoff_s}s"
-                )
-            continue
-
-        stream_active = manager.is_active
-
-        callback_stale = False
-        if STATE.last_callback_time > 0:
-            callback_stale = (time.time() - STATE.last_callback_time) > 10
-
-        if not stream_active or callback_stale:
-            reason = "stream inactive" if not stream_active else "no callbacks for >10s"
-            logger.error(f"Audio stream appears dead ({reason}). Attempting recovery...")
-            if _reopen_audio_stream(reason):
-                consecutive_failures = 0
-                next_retry_time = 0.0
-            else:
-                consecutive_failures += 1
-                backoff_s = min(WATCHDOG_POLL_S * (2 ** consecutive_failures), BACKOFF_MAX_S)
-                next_retry_time = time.time() + backoff_s
-                logger.warning(
-                    f"Recovery failed ({consecutive_failures} consecutive). "
-                    f"Next retry in {backoff_s}s"
-                )
+    watchdog_loops.run_stream_health_watchdog(
+        state=STATE,
+        shutdown_event=STATE.shutdown_event,
+        is_audio_pipeline_busy=_is_audio_pipeline_busy,
+        enumerate_input_devices=_enumerate_input_devices,
+        current_input_topology_signature=_current_input_topology_signature,
+        check_microphone=check_microphone,
+        reopen_audio_stream_fn=_reopen_audio_stream,
+        update_tray_icon=update_tray_icon,
+        write_runtime_state=_write_runtime_state,
+        get_stream_manager=_get_stream_manager,
+        logger=logger,
+    )
 
 
 def _heartbeat_loop():
