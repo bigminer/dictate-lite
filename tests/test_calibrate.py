@@ -209,16 +209,16 @@ class TestCalibrateSourcePatterns:
         """calibrate.py should guard against division by zero."""
         assert 'if ambient_rms > 0:' in self.source
 
-    def test_sd_rec_has_try_except(self):
-        """sd.rec() should be wrapped in try/except."""
-        assert 'sd.rec(' in self.source
-        # Check that there's a try block near sd.rec
+    def test_capture_from_stream_has_try_except(self):
+        """capture_from_stream() should be wrapped in try/except."""
+        assert 'audio_capture.capture_from_stream(' in self.source
+        # Check that there's a try block near capture call
         lines = self.source.splitlines()
         for i, line in enumerate(lines):
-            if 'sd.rec(' in line:
+            if 'audio_capture.capture_from_stream(' in line:
                 # Look back for try
                 context = '\n'.join(lines[max(0, i-5):i+1])
-                assert 'try:' in context, "sd.rec() should be inside a try block"
+                assert 'try:' in context, "capture_from_stream() should be inside a try block"
                 break
 
     def test_record_audio_accepts_device_index(self):

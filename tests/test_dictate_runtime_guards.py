@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import os
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -254,3 +255,48 @@ def test_switch_and_reopen_paths_obey_shared_lock_contention():
     assert reopened is False
     manager.reopen.assert_not_called()
     manager.switch.assert_not_called()
+
+
+def test_config_numeric_strings_are_coerced_for_startup_safety():
+    module, _ = _import_dictate_module({
+        'NOISE_GATE_THRESHOLD': '0.0057',
+        'MAX_TYPED_CHARS': '42',
+    })
+    assert abs(module.NOISE_GATE_THRESHOLD - 0.0057) < 1e-9
+    assert module.MAX_TYPED_CHARS == 42
+
+
+def test_check_single_instance_retries_mutex_for_restart_handoff():
+    module, _ = _import_dictate_module()
+    lock_path = os.path.join(tempfile.gettempdir(), 'voice-dictation-test-restart.lock')
+    if os.path.exists(lock_path):
+        os.unlink(lock_path)
+    module.LOCK_FILE = lock_path
+
+    try:
+        with patch.object(module, '_acquire_single_instance_mutex', side_effect=[False, False, True]) as acquire_mock, \
+             patch.object(module.time, 'sleep') as sleep_mock:
+            module.check_single_instance(retry_seconds=2, poll_seconds=0.01)
+    finally:
+        if os.path.exists(lock_path):
+            os.unlink(lock_path)
+
+    assert acquire_mock.call_count == 3
+    assert sleep_mock.call_count == 2
+
+
+def test_on_tray_restart_uses_restarting_cleanup_status():
+    module, _ = _import_dictate_module()
+    icon = MagicMock()
+
+    with patch('subprocess.Popen') as popen_mock, \
+         patch.object(module, 'cleanup_resources') as cleanup_mock:
+        module.on_tray_restart(icon, None)
+
+    popen_mock.assert_called_once()
+    icon.stop.assert_called_once()
+    cleanup_mock.assert_called_once()
+    kwargs = cleanup_mock.call_args.kwargs
+    assert kwargs['shutdown_status'] == 'restarting'
+    assert kwargs['shutdown_reason'] == 'tray_restart_requested'
+    assert 'restart_parent_pid' in kwargs['extra_details']

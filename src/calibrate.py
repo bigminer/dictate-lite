@@ -8,6 +8,7 @@ import os
 import time
 import numpy as np
 import audio_device_identity as audio_identity
+import audio_capture
 import config_store
 
 # Add src directory to path for config import
@@ -85,29 +86,28 @@ def record_audio(duration, prompt, device_index):
         time.sleep(1)
     print("GO!")
 
-    # Record with try/except for device open failures
+    print(f"  Recording... 0/{int(duration)}s", end='\r')
+
+    # Use blocking InputStream reads instead of sd.rec/sd.wait callback teardown.
+    # This avoids intermittent callback-context cleanup errors seen on some systems.
     try:
-        recording = sd.rec(
-            int(duration * SAMPLE_RATE),
-            samplerate=SAMPLE_RATE,
+        recording = audio_capture.capture_from_stream(
+            sd,
+            device_index=device_index,
+            seconds=duration,
+            sample_rate=SAMPLE_RATE,
             channels=1,
             dtype='float32',
-            device=device_index
+            blocksize=1024,
         )
     except Exception as e:
         print(f"\n  ERROR: Failed to open audio device for recording: {e}")
         print("  Please check your microphone connection and try again.")
         sys.exit(1)
 
-    # Show progress
-    for i in range(int(duration)):
-        time.sleep(1)
-        print(f"  Recording... {i+1}/{int(duration)}s", end='\r')
-
-    sd.wait()
     print(f"  Recording complete! ({duration}s)   ")
 
-    return recording.flatten()
+    return np.asarray(recording, dtype=np.float32).flatten()
 
 
 def calculate_rms(audio):

@@ -33,7 +33,13 @@ _DEFAULT_LOG_LEVEL = getattr(logging, _DEFAULT_LOG_LEVEL_NAME, logging.INFO)
 if not isinstance(_DEFAULT_LOG_LEVEL, int):
     _DEFAULT_LOG_LEVEL = logging.INFO
 
+try:
+    RESTART_MUTEX_WAIT_SECONDS = max(0, int(os.environ.get('VOICE_DICTATION_RESTART_MUTEX_WAIT_SECONDS', '30')))
+except (TypeError, ValueError):
+    RESTART_MUTEX_WAIT_SECONDS = 30
+
 SESSION_ID = uuid.uuid4().hex[:12]
+RESTART_AFTER_PID = None
 
 
 class SessionFilter(logging.Filter):
@@ -42,6 +48,20 @@ class SessionFilter(logging.Filter):
     def filter(self, record):
         record.session_id = SESSION_ID
         return True
+
+
+_BASE_LOG_RECORD_FACTORY = logging.getLogRecordFactory()
+
+
+def _session_record_factory(*args, **kwargs):
+    """Ensure all log records have a session_id used by the formatter."""
+    record = _BASE_LOG_RECORD_FACTORY(*args, **kwargs)
+    if not hasattr(record, 'session_id'):
+        record.session_id = SESSION_ID
+    return record
+
+
+logging.setLogRecordFactory(_session_record_factory)
 
 
 logging.basicConfig(
@@ -441,16 +461,24 @@ def _release_single_instance_mutex():
         _instance_mutex_handle = None
 
 
-def check_single_instance():
+def check_single_instance(retry_seconds=0, poll_seconds=0.5):
     """Ensure only one instance runs. Exit silently if already running.
 
     Primary guard: named OS mutex (survives stale lock files and process-ID reuse).
     Secondary guard: PID lock file for diagnostics and manual recovery visibility.
     """
     logger.info(f"Checking single instance. Mutex: {MUTEX_NAME}")
-    if not _acquire_single_instance_mutex():
-        logger.info("Another Voice Dictation instance already owns the mutex. Exiting.")
-        sys.exit(0)
+    deadline = time.time() + max(0.0, float(retry_seconds))
+    while True:
+        if _acquire_single_instance_mutex():
+            break
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            logger.info("Another Voice Dictation instance already owns the mutex. Exiting.")
+            sys.exit(0)
+        wait_s = min(max(0.1, float(poll_seconds)), remaining)
+        logger.info(f"Another instance owns the mutex. Waiting {wait_s:.1f}s for restart handoff...")
+        time.sleep(wait_s)
 
     logger.info(f"Checking single instance. Lock file: {LOCK_FILE}")
     if os.path.exists(LOCK_FILE):
@@ -517,7 +545,7 @@ def update_tray_icon(color, title=None):
             STATE.tray_title = title
 
 
-def cleanup_resources():
+def cleanup_resources(shutdown_status='shutdown_clean', shutdown_reason='cleanup_resources', extra_details=None):
     """Gracefully release all resources before exit.
     Closes audio stream, unhooks keyboard, removes lock file,
     then calls os._exit(0) as last resort (pystray/keyboard can hang with sys.exit).
@@ -553,15 +581,18 @@ def cleanup_resources():
     # Release singleton mutex
     _release_single_instance_mutex()
 
-    # Persist clean shutdown marker with session metrics before hard exit
-    _write_runtime_state('shutdown_clean', reason='cleanup_resources', details={
+    # Persist final lifecycle marker with session metrics before hard exit.
+    details = {
         'session_id': STATE.session_id,
         'utterance_count': STATE.utterance_count,
         'total_recording_ms': STATE.total_recording_ms,
         'total_chars_typed': STATE.total_chars_typed,
         'device_fallback_count': STATE.device_fallback_count,
         'transcription_errors': STATE.transcription_errors,
-    })
+    }
+    if isinstance(extra_details, dict):
+        details.update(extra_details)
+    _write_runtime_state(shutdown_status, reason=shutdown_reason, details=details)
 
     # Give daemon threads up to 2s to finish before hard exit
     logger.info("Waiting up to 2s for threads to finish...")
@@ -596,7 +627,11 @@ def on_tray_restart(icon, item):
         return
 
     icon.stop()
-    cleanup_resources()
+    cleanup_resources(
+        shutdown_status='restarting',
+        shutdown_reason='tray_restart_requested',
+        extra_details={'restart_parent_pid': my_pid}
+    )
 
 
 def on_tray_exit(icon, item):
@@ -788,6 +823,20 @@ def _config_value(name, default):
     return getattr(_CONFIG, name, default)
 
 
+def _coerce_float_config(value, default):
+    """Parse float config values that may be provided as strings."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                return float(stripped)
+            except ValueError:
+                pass
+    return float(default)
+
+
 HOTKEY = _config_value('HOTKEY', 'alt+f')
 MODEL_SIZE = _config_value('MODEL_SIZE', 'small')
 DEVICE = _config_value('DEVICE', 'cuda')
@@ -803,7 +852,7 @@ USE_CLIPBOARD = _config_value('USE_CLIPBOARD', False)
 LOG_TRANSCRIPT_TEXT = _config_value('LOG_TRANSCRIPT_TEXT', False)
 LOG_LEVEL = _config_value('LOG_LEVEL', None)
 MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
-NOISE_GATE_THRESHOLD = _config_value('NOISE_GATE_THRESHOLD', 0.01)
+NOISE_GATE_THRESHOLD = _coerce_float_config(_config_value('NOISE_GATE_THRESHOLD', 0.01), 0.01)
 
 if _CONFIG is not None:
     logger.info(f"Loaded config: HOTKEY={HOTKEY}, MODEL={MODEL_SIZE}, DEVICE={DEVICE}, LANGUAGE={LANGUAGE}")
@@ -840,7 +889,10 @@ if LOG_LEVEL:
         logger.warning(f"Ignoring invalid LOG_LEVEL value: {LOG_LEVEL!r}")
 
 if not isinstance(MAX_TYPED_CHARS, int):
-    MAX_TYPED_CHARS = 1000
+    try:
+        MAX_TYPED_CHARS = int(str(MAX_TYPED_CHARS).strip())
+    except (TypeError, ValueError):
+        MAX_TYPED_CHARS = 1000
 if MAX_TYPED_CHARS < 1:
     MAX_TYPED_CHARS = 1
 
@@ -1486,7 +1538,8 @@ def main():
         # Ensure only one instance runs
         STATE.shutdown_event.clear()
         STATE.session_id = SESSION_ID
-        check_single_instance()
+        retry_seconds = RESTART_MUTEX_WAIT_SECONDS if RESTART_AFTER_PID is not None else 0
+        check_single_instance(retry_seconds=retry_seconds)
         _write_runtime_state('starting', reason='process_boot')
         logger.info("Starting main()")
 
@@ -1567,6 +1620,7 @@ if __name__ == '__main__':
         if idx + 1 < len(sys.argv):
             try:
                 old_pid = int(sys.argv[idx + 1])
+                RESTART_AFTER_PID = old_pid
                 logger.info(f"Restart mode: waiting for PID {old_pid} to exit")
                 _wait_for_pid_exit(old_pid)
             except ValueError:
