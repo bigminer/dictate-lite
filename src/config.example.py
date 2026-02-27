@@ -63,3 +63,13 @@ LOG_LEVEL = 'INFO'
 # The model will be primed to recognize these spellings
 # Example: 'Claude, Anthropic, TypeScript, GitHub, API, JIRA'
 VOCABULARY = ''
+
+# Wake word mode: hands-free dictation activated by a wake phrase.
+# Requires openwakeword: pip install openwakeword
+# When enabled, the tray icon turns blue while listening for the wake word.
+# Say the wake word to start recording; silence ends the segment.
+WAKE_WORD_ENABLED = False
+WAKE_WORD_MODEL = 'hey_jarvis_v0.1'  # Pre-trained model name or path to custom .onnx
+WAKE_WORD_THRESHOLD = 0.5            # Detection confidence (0.0-1.0)
+WAKE_WORD_SILENCE_TIMEOUT_S = 2.0    # Seconds of silence to end a segment
+WAKE_WORD_OUTPUT_FILE = None          # Path to transcription log file (None = no file output)

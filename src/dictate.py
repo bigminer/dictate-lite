@@ -23,6 +23,8 @@ import transcription_io
 from app_state import DictationAppState
 from audio_stream_manager import AudioStreamManager
 from voice_dictation import recording_pipeline, watchdog_loops
+from voice_dictation.shared_audio_buffer import SharedAudioBuffer
+from voice_dictation.wake_word_mode import WakeWordMode
 
 # Set up logging FIRST before any other imports that might fail
 LOG_DIR = os.path.join(os.path.expanduser('~'), 'voice-dictation')
@@ -154,6 +156,9 @@ _instance_mutex_handle = None
 STATE = DictationAppState()
 stream_manager = None
 _TRAY_IMAGE_CACHE = {}
+_wake_word_mode = WakeWordMode()
+_wake_word_buffer = SharedAudioBuffer(maxlen=500)
+_oww_model = None
 
 # Lock to prevent concurrent device switches
 _switch_lock = threading.Lock()
@@ -524,6 +529,7 @@ def create_tray_image(color='green'):
         'red': (239, 68, 68),      # Recording
         'yellow': (234, 179, 8),   # Processing
         'gray': (156, 163, 175),   # Disabled/loading
+        'blue': (59, 130, 246),    # Wake word listening
     }
     fill_color = colors.get(color, colors['green'])
 
@@ -857,6 +863,12 @@ MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
 NOISE_GATE_THRESHOLD = _coerce_float_config(_config_value('NOISE_GATE_THRESHOLD', 0.01), 0.01)
 NOISE_GATE_PEAK_MULTIPLIER = _coerce_float_config(_config_value('NOISE_GATE_PEAK_MULTIPLIER', 3.0), 3.0)
 
+WAKE_WORD_ENABLED = _config_value('WAKE_WORD_ENABLED', False)
+WAKE_WORD_MODEL = _config_value('WAKE_WORD_MODEL', 'hey_jarvis_v0.1')
+WAKE_WORD_THRESHOLD = _coerce_float_config(_config_value('WAKE_WORD_THRESHOLD', 0.5), 0.5)
+WAKE_WORD_SILENCE_TIMEOUT_S = _coerce_float_config(_config_value('WAKE_WORD_SILENCE_TIMEOUT_S', 2.0), 2.0)
+WAKE_WORD_OUTPUT_FILE = _config_value('WAKE_WORD_OUTPUT_FILE', None)
+
 if _CONFIG is not None:
     logger.info(f"Loaded config: HOTKEY={HOTKEY}, MODEL={MODEL_SIZE}, DEVICE={DEVICE}, LANGUAGE={LANGUAGE}")
 
@@ -987,6 +999,11 @@ def audio_callback(indata, frames, time_info, status):
     STATE.last_callback_time = time.time()
     if status:
         logger.warning(f"Audio status: {status}")
+
+    # Feed wake word buffer (always, when wake word mode is active)
+    if _wake_word_mode.is_enabled:
+        _wake_word_buffer.put((indata.copy() * 32767).astype(np.int16).flatten())
+
     if not STATE.is_recording:
         return
 
@@ -1187,6 +1204,11 @@ def build_tray_menu():
         pystray.MenuItem(f'Language: {LANGUAGE}', lambda: None, enabled=False),
         pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            lambda item: f'Wake Word: {"On" if _wake_word_mode.is_enabled else "Off"}',
+            on_tray_toggle_wake_word,
+        ),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem('Run Startup Healthcheck...', on_tray_healthcheck),
         pystray.MenuItem('Calibrate Noise Gate...', on_tray_calibrate),
         pystray.MenuItem('View Diagnostics...', on_tray_diagnostics),
@@ -1222,6 +1244,12 @@ def run_dictation_loop():
     hook_wd = threading.Thread(target=_keyboard_hook_watchdog, daemon=True)
     hook_wd.start()
     logger.info("Keyboard hook watchdog thread started")
+
+    if WAKE_WORD_ENABLED:
+        _wake_word_mode.enable()
+        ww_thread = threading.Thread(target=_wake_word_listener_loop, daemon=True)
+        ww_thread.start()
+        logger.info("Wake word listener started at boot (WAKE_WORD_ENABLED=True)")
 
     # Block until shutdown — no longer depends on keyboard library's event loop
     try:
@@ -1262,6 +1290,157 @@ def _keyboard_hook_watchdog():
         rehook_fn=_rehook_hotkeys,
         logger=logger,
     )
+
+
+def _load_wake_word_model():
+    """Load OpenWakeWord model. Returns the model or None on failure."""
+    global _oww_model
+    if _oww_model is not None:
+        return _oww_model
+    try:
+        from openwakeword.model import Model
+        _oww_model = Model(
+            wakeword_models=[WAKE_WORD_MODEL],
+            inference_framework='onnx',
+        )
+        logger.info(f'OpenWakeWord model loaded: {WAKE_WORD_MODEL}')
+        return _oww_model
+    except Exception as exc:
+        logger.error(f'Failed to load OpenWakeWord model: {exc}')
+        return None
+
+
+def _wake_word_start_recording():
+    """Called by wake word listener when wake word is detected."""
+    logger.info('Wake word activated — recording started')
+    update_tray_icon('red', 'Voice Dictation - Recording (wake word)...')
+
+
+def _wake_word_record_frame(frame):
+    """Called by wake word listener for each post-wake-word audio frame."""
+    # Convert int16 frame back to float32 and store like the hotkey path does
+    float_frame = frame.astype(np.float32) / 32767.0
+    with STATE.lock:
+        STATE.recorded_frames.append(float_frame.reshape(-1, 1))
+
+
+def _wake_word_stop_and_transcribe():
+    """Called by wake word listener when silence timeout is reached."""
+    logger.info('Wake word silence timeout — transcribing')
+    with STATE.lock:
+        recorded_frames = STATE.recorded_frames
+        STATE.recorded_frames = []
+
+    if not recorded_frames:
+        logger.info('No audio frames captured after wake word')
+        _set_wake_word_listening_icon()
+        return
+
+    try:
+        update_tray_icon('yellow', 'Voice Dictation - Transcribing (wake word)...')
+        audio_data = _prepare_audio_for_transcription(recorded_frames)
+        if audio_data is None:
+            _set_wake_word_listening_icon()
+            return
+
+        result = recording_pipeline.transcribe_audio(
+            audio_data,
+            model=STATE.model,
+            transcription_io_module=transcription_io,
+            sample_rate=SAMPLE_RATE,
+            transcribe_language=TRANSCRIBE_LANGUAGE,
+            vocabulary=VOCABULARY,
+            max_typed_chars=MAX_TYPED_CHARS,
+            logger=logger,
+        )
+        text = result['text']
+        if not text:
+            logger.info('No speech detected after wake word')
+            _set_wake_word_listening_icon()
+            return
+
+        STATE.utterance_count += 1
+        STATE.total_recording_ms += int(result['transcription_ms'])
+        logger.info(f"Wake word transcription: {len(text)} chars")
+
+        # Type into active window (same as hotkey mode)
+        time.sleep(0.05)
+        _release_modifier_keys()
+        keyboard.write(text, delay=0.01, restore_state_after=False)
+        STATE.total_chars_typed += len(text)
+
+        # Append to file (wake word mode only)
+        if WAKE_WORD_OUTPUT_FILE:
+            from voice_dictation.transcription_file_writer import append_transcription
+            append_transcription(WAKE_WORD_OUTPUT_FILE, text)
+    except Exception as exc:
+        logger.error(f'Wake word transcription error: {exc}')
+    finally:
+        _set_wake_word_listening_icon()
+
+
+def _set_wake_word_listening_icon():
+    """Set tray to blue when wake word mode is active and listening."""
+    if _wake_word_mode.is_enabled:
+        update_tray_icon('blue', f'Voice Dictation - Listening [{WAKE_WORD_MODEL}]')
+    else:
+        _set_ready_icon()
+
+
+def _wake_word_listener_loop():
+    """Run the wake word listener in a background thread."""
+    from voice_dictation.wake_word_listener import run_wake_word_listener
+
+    model = _load_wake_word_model()
+    if model is None:
+        logger.error('Wake word listener aborted — model failed to load')
+        return
+
+    # Determine the model key name from the loaded model
+    model_keys = list(model.models.keys())
+    if not model_keys:
+        logger.error('Wake word model has no detection keys')
+        return
+    model_key = model_keys[0]
+    logger.info(f'Wake word listener using model key: {model_key}')
+
+    _set_wake_word_listening_icon()
+
+    def get_frame():
+        """Read a frame from the shared buffer, blocking briefly if empty."""
+        while not STATE.shutdown_event.is_set():
+            frame = _wake_word_buffer.get()
+            if frame is not None:
+                return frame
+            STATE.shutdown_event.wait(0.01)  # 10ms poll
+        return np.zeros(1280, dtype=np.int16)
+
+    run_wake_word_listener(
+        shutdown_event=STATE.shutdown_event,
+        get_audio_frame=get_frame,
+        predict_fn=model.predict,
+        start_recording=_wake_word_start_recording,
+        stop_and_transcribe=_wake_word_stop_and_transcribe,
+        record_frame=_wake_word_record_frame,
+        threshold=WAKE_WORD_THRESHOLD,
+        silence_timeout_s=WAKE_WORD_SILENCE_TIMEOUT_S,
+        model_name=model_key,
+        logger=logger,
+    )
+
+
+def on_tray_toggle_wake_word(icon, item):
+    """Toggle wake word mode from the tray menu."""
+    _wake_word_mode.toggle()
+    if _wake_word_mode.is_enabled:
+        logger.info('Wake word mode enabled')
+        ww_thread = threading.Thread(target=_wake_word_listener_loop, daemon=True)
+        ww_thread.start()
+    else:
+        logger.info('Wake word mode disabled')
+        _set_ready_icon()
+    if STATE.tray_icon:
+        STATE.tray_icon.update_menu()
 
 
 def test_microphone():
