@@ -1310,12 +1310,22 @@ def _load_wake_word_model():
         return None
 
 
+def _play_tone(freq1, freq2, duration_ms=80):
+    """Play a quick two-note pip in a background thread (non-blocking)."""
+    def _beep():
+        import winsound
+        winsound.Beep(freq1, duration_ms)
+        winsound.Beep(freq2, duration_ms)
+    threading.Thread(target=_beep, daemon=True).start()
+
+
 def _wake_word_start_recording():
     """Called by wake word listener when wake word is detected."""
     if STATE.is_recording or STATE.is_processing:
         logger.info('Wake word detected but hotkey recording/processing in progress — ignoring')
         return
     logger.info('Wake word activated — recording started')
+    _play_tone(800, 1000)  # ascending pip: recording started
     update_tray_icon('red', 'Voice Dictation - Recording (wake word)...')
 
 
@@ -1329,6 +1339,7 @@ def _wake_word_record_frame(frame):
 
 def _wake_word_stop_and_transcribe():
     """Called by wake word listener when silence timeout is reached."""
+    _play_tone(1000, 800)  # descending pip: recording ended
     logger.info('Wake word silence timeout — transcribing')
     with STATE.lock:
         recorded_frames = STATE.recorded_frames
