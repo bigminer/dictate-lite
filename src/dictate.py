@@ -1205,7 +1205,7 @@ def build_tray_menu():
         pystray.MenuItem(f'Noise Reduction: {noise_status}', lambda: None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem(
-            lambda item: f'Wake Word: {"On" if _wake_word_mode.is_enabled else "Off"}',
+            lambda item: 'Disable Open Mic Mode' if _wake_word_mode.is_enabled else 'Enable Open Mic Mode',
             on_tray_toggle_wake_word,
         ),
         pystray.Menu.SEPARATOR,
@@ -1312,6 +1312,9 @@ def _load_wake_word_model():
 
 def _wake_word_start_recording():
     """Called by wake word listener when wake word is detected."""
+    if STATE.is_recording or STATE.is_processing:
+        logger.info('Wake word detected but hotkey recording/processing in progress — ignoring')
+        return
     logger.info('Wake word activated — recording started')
     update_tray_icon('red', 'Voice Dictation - Recording (wake word)...')
 
@@ -1382,7 +1385,7 @@ def _wake_word_stop_and_transcribe():
 def _set_wake_word_listening_icon():
     """Set tray to blue when wake word mode is active and listening."""
     if _wake_word_mode.is_enabled:
-        update_tray_icon('blue', f'Voice Dictation - Listening [{WAKE_WORD_MODEL}]')
+        update_tray_icon('blue', 'Voice Dictation - Open Mic Mode')
     else:
         _set_ready_icon()
 

@@ -161,18 +161,19 @@ def test_ignores_audio_below_threshold():
 # ---------------------------------------------------------------------------
 
 def test_wake_word_frames_excluded_from_recording():
-    """Frames containing the wake word should not be passed to record_frame.
+    """The wake word frame itself should not be recorded.
 
-    Only frames AFTER the wake word detection should be recorded.
+    Pre-wake frames and the detection frame are excluded. All frames AFTER
+    detection (speech + trailing silence until timeout) are recorded.
     """
     speech_frame = _make_frame(0.5)  # distinguishable from silence
     frames = [
         SILENT_FRAME,      # pre-wake (not recorded)
         SILENT_FRAME,      # wake word fires here (not recorded — it IS the wake word)
-        speech_frame,       # post-wake speech (SHOULD be recorded)
-        speech_frame,       # more speech (SHOULD be recorded)
-        SILENT_FRAME,       # silence → timeout
-        SILENT_FRAME,       # silence → timeout triggers
+        speech_frame,       # post-wake speech (recorded)
+        speech_frame,       # more speech (recorded)
+        SILENT_FRAME,       # trailing silence (recorded, waiting for timeout)
+        SILENT_FRAME,       # trailing silence (recorded, timeout triggers after this)
     ]
     predict_results = [
         {'test_model': 0.0},
@@ -190,13 +191,14 @@ def test_wake_word_frames_excluded_from_recording():
         record_frame=lambda f: recorded_frames.append(f),
     )
 
-    assert len(recorded_frames) == 2, (
-        f'Expected 2 speech frames recorded (excluding wake word frame), '
+    # 4 frames recorded: 2 speech + 2 trailing silence (wake word frame excluded)
+    assert len(recorded_frames) == 4, (
+        f'Expected 4 post-wake frames recorded (excluding wake word frame), '
         f'got {len(recorded_frames)}'
     )
-    # Verify the recorded frames are the speech frames, not the wake word frame
-    for f in recorded_frames:
-        assert np.allclose(f, speech_frame), 'Recorded frame should be speech, not silence/wake word'
+    # First 2 frames should be the speech frames
+    assert np.allclose(recorded_frames[0], speech_frame)
+    assert np.allclose(recorded_frames[1], speech_frame)
 
 
 # ---------------------------------------------------------------------------
