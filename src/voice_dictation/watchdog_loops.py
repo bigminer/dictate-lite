@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import time
 
 
@@ -162,12 +164,30 @@ def run_stream_health_watchdog(
     logger,
     watchdog_poll_s=5,
     backoff_max_s=300,
+    re_resolve_after_failures=3,
 ):
     """Monitor stream/device health and attempt automatic recovery."""
     logger.info('Stream health watchdog started')
 
     consecutive_failures = 0
     next_retry_time = 0.0
+
+    def _on_recovery_failure():
+        """Shared handler for reopen failures: backoff, then re-resolve after threshold."""
+        nonlocal consecutive_failures, next_retry_time
+        consecutive_failures += 1
+        backoff_s = min(watchdog_poll_s * (2 ** consecutive_failures), backoff_max_s)
+        next_retry_time = time.time() + backoff_s
+        logger.warning(
+            f'Recovery failed ({consecutive_failures} consecutive). '
+            f'Next retry in {backoff_s}s'
+        )
+        if consecutive_failures >= re_resolve_after_failures:
+            logger.info('Multiple consecutive recovery failures. Re-resolving device...')
+            if check_microphone():
+                consecutive_failures = 0
+                next_retry_time = 0.0
+                logger.info('Device re-resolved. Will retry immediately.')
 
     while not shutdown_event.is_set():
         shutdown_event.wait(watchdog_poll_s)
@@ -226,13 +246,7 @@ def run_stream_health_watchdog(
                 consecutive_failures = 0
                 next_retry_time = 0.0
             else:
-                consecutive_failures += 1
-                backoff_s = min(watchdog_poll_s * (2 ** consecutive_failures), backoff_max_s)
-                next_retry_time = time.time() + backoff_s
-                logger.warning(
-                    f'Recovery failed ({consecutive_failures} consecutive). '
-                    f'Next retry in {backoff_s}s'
-                )
+                _on_recovery_failure()
             continue
 
         stream_active = manager.is_active
@@ -247,11 +261,154 @@ def run_stream_health_watchdog(
                 consecutive_failures = 0
                 next_retry_time = 0.0
             else:
-                consecutive_failures += 1
-                backoff_s = min(watchdog_poll_s * (2 ** consecutive_failures), backoff_max_s)
-                next_retry_time = time.time() + backoff_s
+                _on_recovery_failure()
+
+
+# ---------------------------------------------------------------------------
+# Virtual-key codes for GetAsyncKeyState (Windows only)
+# ---------------------------------------------------------------------------
+
+_VK_MAP = {
+    'alt': 0x12, 'left alt': 0xA4, 'right alt': 0xA5,
+    'ctrl': 0x11, 'left ctrl': 0xA2, 'right ctrl': 0xA3,
+    'shift': 0x10, 'left shift': 0xA0, 'right shift': 0xA1,
+    'windows': 0x5B, 'left windows': 0x5B, 'right windows': 0x5C,
+    'space': 0x20, 'enter': 0x0D, 'tab': 0x09, 'escape': 0x1B,
+    'backspace': 0x08, 'delete': 0x2E, 'insert': 0x2D,
+    'home': 0x24, 'end': 0x23, 'page up': 0x21, 'page down': 0x22,
+    'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+    'caps lock': 0x14, 'num lock': 0x90, 'scroll lock': 0x91,
+    'print screen': 0x2C, 'pause': 0x13,
+}
+
+# F1-F24
+for _i in range(1, 25):
+    _VK_MAP[f'f{_i}'] = 0x6F + _i  # VK_F1=0x70 .. VK_F24=0x87
+
+# Single characters (a-z, 0-9)
+for _c in range(ord('a'), ord('z') + 1):
+    _VK_MAP[chr(_c)] = _c - 32  # VK for 'a' is 0x41
+for _d in range(0, 10):
+    _VK_MAP[str(_d)] = 0x30 + _d
+
+
+def _hotkey_parts_to_vk_codes(hotkey_parts):
+    """Convert hotkey part names to Windows virtual key codes.
+
+    Returns a list of VK codes, or None if any part is unmappable.
+    """
+    codes = []
+    for part in hotkey_parts:
+        key = part.lower().strip()
+        vk = _VK_MAP.get(key)
+        if vk is None:
+            return None
+        codes.append(vk)
+    return codes
+
+
+def _are_all_vk_pressed(vk_codes):
+    """Check physical key state via Win32 GetAsyncKeyState.
+
+    Returns True if every key in *vk_codes* is currently held down.
+    """
+    if sys.platform != 'win32':
+        return False
+    get_state = ctypes.windll.user32.GetAsyncKeyState
+    for vk in vk_codes:
+        # Bit 15 (0x8000) means key is currently held down
+        if not (get_state(vk) & 0x8000):
+            return False
+    return True
+
+
+def run_keyboard_hook_watchdog(
+    *,
+    state,
+    shutdown_event,
+    hotkey_parts,
+    rehook_fn,
+    logger,
+    poll_interval_s=0.5,
+    detection_threshold_s=1.0,
+    proactive_rehook_interval_s=600,
+):
+    """Detect and recover from silently-dead Windows keyboard hooks.
+
+    Two recovery strategies:
+    1. **Reactive**: Uses GetAsyncKeyState to detect when the hotkey is
+       physically held but no callback fires.  If the keys are held for
+       *detection_threshold_s* while the app is idle (not recording/processing),
+       the hook is assumed dead and re-registered.
+    2. **Proactive**: Every *proactive_rehook_interval_s* seconds the hotkeys
+       are unconditionally re-registered as cheap insurance.
+    """
+    if sys.platform != 'win32':
+        logger.info('Keyboard hook watchdog: not Windows, skipping')
+        return
+
+    vk_codes = _hotkey_parts_to_vk_codes(hotkey_parts)
+    if vk_codes is None:
+        logger.warning(
+            f'Keyboard hook watchdog: could not map hotkey parts {hotkey_parts!r} '
+            f'to VK codes; reactive detection disabled'
+        )
+
+    logger.info(
+        f'Keyboard hook watchdog started '
+        f'(reactive={"enabled" if vk_codes else "disabled"}, '
+        f'proactive every {proactive_rehook_interval_s}s)'
+    )
+
+    pressed_since = 0.0
+    last_proactive_rehook = time.time()
+
+    while not shutdown_event.is_set():
+        shutdown_event.wait(poll_interval_s)
+        if shutdown_event.is_set():
+            break
+
+        now = time.time()
+
+        # --- Proactive rehook ---
+        if (now - last_proactive_rehook) >= proactive_rehook_interval_s:
+            logger.info('Keyboard hook watchdog: proactive rehook (scheduled)')
+            try:
+                rehook_fn()
+                state.hotkey_rehook_count += 1
+                last_proactive_rehook = now
+                pressed_since = 0.0
+            except Exception as exc:
+                logger.error(f'Keyboard hook watchdog: proactive rehook failed: {exc}')
+            continue
+
+        # --- Reactive detection ---
+        if vk_codes is None:
+            continue
+
+        # Skip if the app is busy (recording or processing) — the hook is
+        # clearly working if we got into that state.
+        if state.is_recording or state.is_processing:
+            pressed_since = 0.0
+            continue
+
+        all_pressed = _are_all_vk_pressed(vk_codes)
+
+        if all_pressed:
+            if pressed_since == 0.0:
+                pressed_since = now
+            elif (now - pressed_since) >= detection_threshold_s:
                 logger.warning(
-                    f'Recovery failed ({consecutive_failures} consecutive). '
-                    f'Next retry in {backoff_s}s'
+                    f'Keyboard hook watchdog: hotkey held for '
+                    f'{now - pressed_since:.1f}s with no callback — hook appears dead. Rehooking...'
                 )
+                try:
+                    rehook_fn()
+                    state.hotkey_rehook_count += 1
+                    last_proactive_rehook = now
+                except Exception as exc:
+                    logger.error(f'Keyboard hook watchdog: reactive rehook failed: {exc}')
+                pressed_since = 0.0
+        else:
+            pressed_since = 0.0
 

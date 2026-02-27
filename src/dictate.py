@@ -590,6 +590,7 @@ def cleanup_resources(shutdown_status='shutdown_clean', shutdown_reason='cleanup
         'total_chars_typed': STATE.total_chars_typed,
         'device_fallback_count': STATE.device_fallback_count,
         'transcription_errors': STATE.transcription_errors,
+        'hotkey_rehook_count': STATE.hotkey_rehook_count,
     }
     if isinstance(extra_details, dict):
         details.update(extra_details)
@@ -1102,6 +1103,7 @@ def stop_recording_and_transcribe():
 
 def on_hotkey_press():
     """Called when hotkey is pressed."""
+    STATE.last_hotkey_callback_time = time.time()
     start_recording()
 
 
@@ -1194,20 +1196,36 @@ def build_tray_menu():
     )
 
 
+def _rehook_hotkeys():
+    """Unhook all keyboard hooks and re-register the hotkey pair.
+
+    Called by the keyboard hook watchdog when the Windows low-level hook
+    (WH_KEYBOARD_LL) silently dies, or proactively as scheduled insurance.
+    """
+    keyboard.unhook_all()
+    keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
+    keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
+    logger.info(f"Hotkeys re-registered: {HOTKEY}")
+
+
 def run_dictation_loop():
-    """Run the main dictation loop (hotkey callbacks + recording watchdog)."""
+    """Run the main dictation loop (hotkey callbacks + watchdogs)."""
     logger.info(f"Registering hotkey: {HOTKEY}")
     keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
     keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
     logger.info("Hotkey registered. Ready for dictation!")
 
-    watchdog_thread = threading.Thread(target=_recording_state_watchdog, daemon=True)
-    watchdog_thread.start()
+    recording_wd = threading.Thread(target=_recording_state_watchdog, daemon=True)
+    recording_wd.start()
     logger.info("Recording watchdog thread started")
 
-    # Keep running until interrupted
+    hook_wd = threading.Thread(target=_keyboard_hook_watchdog, daemon=True)
+    hook_wd.start()
+    logger.info("Keyboard hook watchdog thread started")
+
+    # Block until shutdown — no longer depends on keyboard library's event loop
     try:
-        keyboard.wait()
+        STATE.shutdown_event.wait()
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, exiting...")
 
@@ -1231,6 +1249,17 @@ def _recording_state_watchdog():
         idle_recording_monitor_interval=IDLE_RECORDING_MONITOR_INTERVAL,
         max_recording_seconds=MAX_RECORDING_SECONDS,
         release_fallback_message=RECORDING_RELEASE_FALLBACK_LOG,
+        logger=logger,
+    )
+
+
+def _keyboard_hook_watchdog():
+    """Detect dead keyboard hooks via GetAsyncKeyState and auto-recover."""
+    watchdog_loops.run_keyboard_hook_watchdog(
+        state=STATE,
+        shutdown_event=STATE.shutdown_event,
+        hotkey_parts=HOTKEY_PARTS,
+        rehook_fn=_rehook_hotkeys,
         logger=logger,
     )
 

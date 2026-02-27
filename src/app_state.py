@@ -35,6 +35,8 @@ class DictationAppState:
     total_chars_typed: int = 0
     device_fallback_count: int = 0
     transcription_errors: int = 0
+    hotkey_rehook_count: int = 0
+    last_hotkey_callback_time: float = 0.0
 
     shutdown_event: Event = field(default_factory=Event)
     lock: RLock = field(default_factory=RLock)
