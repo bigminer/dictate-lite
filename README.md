@@ -2,13 +2,16 @@
 
 > **Windows Only** - This tool uses Windows-specific APIs for global hotkeys and system tray integration. It will not run on macOS or Linux.
 
-Hold a hotkey to record your voice, release to transcribe and type the text into any application.
+Hold a hotkey to record your voice, release to transcribe and type the text into any application. Or enable **Open Mic Mode** for hands-free dictation with wake word activation.
 
 Uses OpenAI Whisper (via faster-whisper) with GPU acceleration for fast, accurate transcription. Runs quietly in the system tray.
 
 ## Features
 
-- **System tray icon** - Green (ready), red (recording), yellow (processing)
+- **Push-to-talk** - Hold hotkey to record, release to transcribe
+- **Open Mic Mode** - Say a wake word to start recording; silence ends the segment automatically
+- **System tray icon** - Green (ready), blue (open mic listening), red (recording), yellow (processing)
+- **Audio feedback** - Ascending/descending tones confirm recording start/stop in open mic mode
 - **Configurable hotkey** - Default Alt+F, fully customizable
 - **Multiple languages** - English, auto-detect, or 50+ language codes
 - **Model selection** - Trade speed vs accuracy (tiny → large)
@@ -104,7 +107,21 @@ The installer is idempotent - safe to run multiple times to reconfigure.
 
    **Note:** Clipboard backup is disabled by default. Enable `USE_CLIPBOARD = True` in `src/config.py` if you want every transcript copied as backup.
 
-3. **Check status:** Hover over tray icon for current settings
+3. **Open Mic Mode (hands-free):**
+   - Right-click tray icon → **Enable Open Mic Mode**
+   - Icon turns blue — listening for wake word
+   - Say **"hey Jarvis"** (or your configured wake word)
+   - Ascending tone plays — recording started
+   - Speak naturally — the system detects when you stop talking
+   - Descending tone plays — recording ended, transcribing
+   - Text appears in your active window
+   - Icon returns to blue, ready for the next wake word
+
+   Both modes work simultaneously — you can use the hotkey anytime even with open mic enabled. Open mic mode uses [OpenWakeWord](https://github.com/dscripka/openWakeWord) for lightweight, local wake word detection on CPU.
+
+   **First-time setup:** Install the dependency with `pip install openwakeword` (or re-run `install.bat`). Pre-trained wake words include "hey Jarvis", "alexa", "hey Mycroft", and others.
+
+4. **Check status:** Hover over tray icon for current settings
 
 4. **Run healthcheck while app is running:** Right-click tray icon → `Run Startup Healthcheck...`
 
@@ -208,6 +225,13 @@ LOG_TRANSCRIPT_TEXT = False  # Log transcript snippets (debug only)
 MAX_TYPED_CHARS = 1000    # Maximum characters typed per utterance
 LOG_LEVEL = 'INFO'        # Runtime log verbosity (DEBUG/INFO/WARNING/ERROR)
 VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
+
+# Open Mic / Wake Word Mode
+WAKE_WORD_ENABLED = False          # Start with open mic on at launch
+WAKE_WORD_MODEL = 'hey_jarvis_v0.1'  # Pre-trained model or path to custom .onnx
+WAKE_WORD_THRESHOLD = 0.5         # Detection confidence (0.0-1.0)
+WAKE_WORD_SILENCE_TIMEOUT_S = 2.0 # Seconds of silence to end a segment
+WAKE_WORD_OUTPUT_FILE = None      # Path to transcription log file (optional)
 ```
 
 ### Custom Vocabulary
@@ -244,6 +268,10 @@ voice-dictation/
 | `src/dictate.py` | Main orchestration + compatibility facade (tray/hotkey/runtime wiring) |
 | `src/voice_dictation/recording_pipeline.py` | Extracted recording/transcription preparation pipeline helpers |
 | `src/voice_dictation/watchdog_loops.py` | Extracted recording and stream watchdog/recovery loops |
+| `src/voice_dictation/wake_word_listener.py` | Wake word detection loop with energy-based silence timeout |
+| `src/voice_dictation/shared_audio_buffer.py` | Thread-safe FIFO for audio frames between producer/consumer |
+| `src/voice_dictation/wake_word_mode.py` | Wake word mode state management (enable/disable/toggle) |
+| `src/voice_dictation/transcription_file_writer.py` | Plain text transcription log file writer |
 | `src/diagnostics.py` | Diagnostic log and runtime-state analyzer |
 | `src/startup_healthcheck.py` | Operational preflight + spoken phrase verification |
 | `src/calibrate.py` | Noise gate calibration workflow |
@@ -279,6 +307,9 @@ voice-dictation/
 - `tests/test_transcription_io.py` - temporary WAV transcription helper behavior
 - `tests/test_app_state.py` - runtime state container defaults
 - `tests/test_claude_status_tts.py` - command hardening for Claude statusline helper
+- `tests/test_wake_word_listener.py` - wake word detection, silence timeout, frame exclusion
+- `tests/test_wake_word_components.py` - file writer, shared buffer, mode toggle
+- `tests/test_watchdog_recovery.py` - device re-resolve after persistent recovery failures
 
 ### speak.py - Text-to-Speech Utility
 
@@ -305,4 +336,5 @@ This project is built on excellent open source software:
 - **[keyboard](https://github.com/boppreh/keyboard)** - Global hotkeys (MIT)
 - **[sounddevice](https://python-sounddevice.readthedocs.io/)** - Audio capture (MIT)
 - **[noisereduce](https://github.com/timsainb/noisereduce)** - Audio noise reduction (MIT)
+- **[openWakeWord](https://github.com/dscripka/openWakeWord)** - Wake word detection (Apache 2.0)
 - **[edge-tts](https://github.com/rany2/edge-tts)** - Text-to-speech (MIT)
