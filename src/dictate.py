@@ -1054,6 +1054,29 @@ def _prepare_audio_for_transcription(recorded_frames):
     )
 
 
+import re as _re
+
+_SEND_IT_PATTERN = _re.compile(r'[,.\s]*send it[.!]?$', _re.IGNORECASE)
+
+
+def _inject_text(text):
+    """Type text into the active window. Detects 'send it' command to press Enter."""
+    send_enter = bool(_SEND_IT_PATTERN.search(text))
+    if send_enter:
+        text = _SEND_IT_PATTERN.sub('', text).rstrip()
+        logger.info('Voice command detected: "send it" → will press Enter')
+
+    if text:
+        time.sleep(0.05)
+        _release_modifier_keys()
+        keyboard.write(text, delay=0.01, restore_state_after=False)
+        STATE.total_chars_typed += len(text)
+
+    if send_enter:
+        time.sleep(0.05)
+        keyboard.press_and_release('enter')
+
+
 def _transcribe_and_emit_text(audio_data):
     """Run Whisper transcription then emit text to clipboard/active window."""
     result = recording_pipeline.transcribe_audio(
@@ -1088,14 +1111,7 @@ def _transcribe_and_emit_text(audio_data):
     if USE_CLIPBOARD:
         pyperclip.copy(text)
 
-    # Type the text into active window
-    # Small delay to ensure window focus
-    time.sleep(0.05)
-    _release_modifier_keys()
-    # Add delay between keystrokes to prevent Claude Code crash
-    # (Known bug: rapid text injection causes TUI crash)
-    keyboard.write(text, delay=0.01, restore_state_after=False)  # 10ms between characters
-    STATE.total_chars_typed += len(text)
+    _inject_text(text)
 
 
 def stop_recording_and_transcribe():
@@ -1338,7 +1354,16 @@ def _wake_word_record_frame(frame):
 
 
 def _wake_word_stop_and_transcribe():
-    """Called by wake word listener when silence timeout is reached."""
+    """Called by wake word listener when silence timeout is reached.
+
+    Runs transcription in a background thread so the listener loop keeps
+    consuming frames and is ready for the next wake word immediately.
+    """
+    threading.Thread(target=_wake_word_transcribe_worker, daemon=True).start()
+
+
+def _wake_word_transcribe_worker():
+    """Background worker for wake word transcription."""
     _play_tone(1000, 800)  # descending pip: recording ended
     logger.info('Wake word silence timeout — transcribing')
     with STATE.lock:
@@ -1377,11 +1402,7 @@ def _wake_word_stop_and_transcribe():
         STATE.total_recording_ms += int(result['transcription_ms'])
         logger.info(f"Wake word transcription: {len(text)} chars")
 
-        # Type into active window (same as hotkey mode)
-        time.sleep(0.05)
-        _release_modifier_keys()
-        keyboard.write(text, delay=0.01, restore_state_after=False)
-        STATE.total_chars_typed += len(text)
+        _inject_text(text)
 
         # Append to file (wake word mode only)
         if WAKE_WORD_OUTPUT_FILE:
@@ -1436,6 +1457,7 @@ def _wake_word_listener_loop():
         start_recording=_wake_word_start_recording,
         stop_and_transcribe=_wake_word_stop_and_transcribe,
         record_frame=_wake_word_record_frame,
+        reset_model=model.reset,
         threshold=WAKE_WORD_THRESHOLD,
         silence_timeout_s=WAKE_WORD_SILENCE_TIMEOUT_S,
         model_name=model_key,

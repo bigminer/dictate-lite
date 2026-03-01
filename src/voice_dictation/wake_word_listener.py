@@ -21,6 +21,7 @@ def run_wake_word_listener(
     start_recording,
     stop_and_transcribe,
     record_frame,
+    reset_model=None,
     threshold=0.5,
     silence_timeout_s=2.0,
     speech_energy_threshold=0.01,
@@ -70,4 +71,6 @@ def run_wake_word_listener(
             elif get_time() - last_speech_time >= silence_timeout_s:
                 logger.info('Silence timeout reached (%.1fs), ending segment', silence_timeout_s)
                 is_recording = False
+                if reset_model is not None:
+                    reset_model()
                 stop_and_transcribe()
