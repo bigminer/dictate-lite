@@ -163,68 +163,9 @@ _oww_model = None
 # Lock to prevent concurrent device switches
 _switch_lock = threading.Lock()
 
-def _normalize_device_name(name):
-    """Normalize device name for stable identity hashing."""
-    return audio_identity.normalize_device_name(name)
-
-
-def _build_device_uid(device_name, hostapi_name, device_info):
-    """Build a stable UID from microphone metadata."""
-    return audio_identity.build_device_uid(device_name, hostapi_name, device_info)
-
-
 def _enumerate_input_devices():
     """Return input tuples: (index, name, hostapi_name, hostapi_index, device_uid)."""
     return audio_identity.enumerate_input_devices(sd)
-
-
-def _choose_candidate(candidates, preferred_index=None, default_index=None):
-    """Choose a device tuple from candidates with deterministic preference order."""
-    return audio_identity.choose_candidate(
-        candidates,
-        preferred_index=preferred_index,
-        default_index=default_index
-    )
-
-
-def _resolve_device_name_to_index(
-    device_name,
-    input_devices,
-    preferred_hostapi=None,
-    preferred_index=None,
-    default_index=None
-):
-    """Resolve saved device identity to an input device tuple.
-
-    Resolution order:
-    1) exact name + hostapi
-    2) exact name
-    3) substring name + hostapi
-    4) substring name
-    For ambiguous matches, prefer saved index then system default index then WASAPI.
-    Returns (index, name, hostapi_name, device_uid) or (None, None, None, None).
-    """
-    # Keep wrapper for compatibility with existing tests/call sites.
-    resolved = audio_identity.resolve_device_name(
-        device_name,
-        input_devices,
-        preferred_hostapi=preferred_hostapi,
-        preferred_index=preferred_index,
-        default_index=default_index
-    )
-    idx, name, hostapi_name, uid = resolved
-    if idx is not None:
-        logger.info(f"Resolved device by name: [{idx}] '{name}' ({hostapi_name}) uid={uid}")
-    return resolved
-
-
-def _resolve_device_uid_to_index(device_uid, input_devices, default_index=None):
-    """Resolve saved UID to an input device tuple."""
-    return audio_identity.resolve_device_uid(
-        device_uid,
-        input_devices,
-        default_index=default_index
-    )
 
 
 def _get_stream_manager():
@@ -763,7 +704,7 @@ def switch_audio_device(device_index, device_name, device_hostapi=None, device_u
                     if isinstance(hostapi_index, int) and 0 <= hostapi_index < len(hostapis):
                         device_hostapi = hostapis[hostapi_index]['name']
                 if not device_uid:
-                    device_uid = _build_device_uid(device_name, device_hostapi, dev_info)
+                    device_uid = audio_identity.build_device_uid(device_name, device_hostapi, dev_info)
             except Exception:
                 logger.debug("Failed to query device hostapi", exc_info=True)
                 if not device_hostapi:
@@ -1276,16 +1217,11 @@ def run_dictation_loop():
 
 def _recording_state_watchdog():
     """Monitor timeout/silence and fallback key-release detection while recording."""
-    def _hotkey_pressed_for_watchdog():
-        if not _is_hotkey_currently_pressed():
-            return False
-        return True
-
     watchdog_loops.run_recording_state_watchdog(
         state=STATE,
         shutdown_event=STATE.shutdown_event,
         get_recording_snapshot=_recording_snapshot,
-        is_hotkey_currently_pressed=_hotkey_pressed_for_watchdog,
+        is_hotkey_currently_pressed=_is_hotkey_currently_pressed,
         stop_recording_and_transcribe=stop_recording_and_transcribe,
         set_recording_icon=_set_recording_icon,
         recording_muted_warning_title=RECORDING_MUTED_WARNING_TITLE,

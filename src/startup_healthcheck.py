@@ -8,6 +8,7 @@ Runs an operational readiness check in the startup command window:
 4) Report pass/fail with actionable guidance
 """
 
+import logging
 import os
 import re
 import sys
@@ -21,6 +22,9 @@ import audio_device_identity as audio_identity
 import audio_capture
 import runtime_state
 import transcription_io
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 
 TARGET_PROMPT = 'check 1 2 3'
@@ -149,21 +153,12 @@ def transcribe_audio(cfg, audio):
     compute_type = cfg['COMPUTE_TYPE'] or ('float16' if device == 'cuda' else 'int8')
     language = None if cfg['LANGUAGE'] == 'auto' else cfg['LANGUAGE']
 
-    class _ConsoleLogger:
-        @staticmethod
-        def info(msg):
-            print(f'[INFO] {msg}')
-
-        @staticmethod
-        def warning(msg):
-            print(f'[WARN] {msg}')
-
     model, used_fallback = transcription_io.load_whisper_model(
         model_size=model_size,
         device=device,
         compute_type=compute_type,
         fallback_model='tiny',
-        logger=_ConsoleLogger,
+        logger=logger,
     )
     if used_fallback:
         language = None

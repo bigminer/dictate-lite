@@ -3,6 +3,7 @@ Noise Gate Calibration Tool
 Records ambient noise and speech to automatically calculate optimal threshold.
 """
 
+import logging
 import sys
 import os
 import time
@@ -10,6 +11,9 @@ import numpy as np
 import audio_device_identity as audio_identity
 import audio_capture
 import config_store
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 # Add src directory to path for config import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -129,16 +133,11 @@ def update_config(threshold):
         print("Please run install.bat first or create config.py manually.")
         return False
 
-    class _PrintLogger:
-        @staticmethod
-        def warning(msg):
-            print(f"WARNING: {msg}")
-
     ok = config_store.update_config_values(
         config_path=config_path,
         updates={'NOISE_GATE_THRESHOLD': threshold},
         comments={'NOISE_GATE_THRESHOLD': '# Noise gate threshold (auto-calibrated)'},
-        logger=_PrintLogger,
+        logger=logger,
     )
     if not ok:
         print(f"\nERROR: Failed to update {config_path}")

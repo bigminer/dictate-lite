@@ -529,7 +529,7 @@ class TestHotkeyReleaseFallback:
         src_path = os.path.join(os.path.dirname(__file__), '..', 'src', 'dictate.py')
         with open(src_path, 'r') as f:
             source = f.read()
-        assert 'if not _is_hotkey_currently_pressed():' in source
+        assert 'is_hotkey_currently_pressed=_is_hotkey_currently_pressed,' in source
         assert 'Recording stop fallback triggered: hotkey no longer pressed' in source
 
 
