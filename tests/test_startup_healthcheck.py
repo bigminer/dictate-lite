@@ -35,16 +35,24 @@ def test_parse_args_sets_expected_flags():
 
 def test_resolve_device_returns_none_when_no_match():
     cfg = _default_cfg()
-    input_devices = [(1, 'Mic', 'Windows WASAPI', 'uid-1')]
-    with patch.object(healthcheck.audio_identity, 'resolve_preferred_input_device', return_value=(None, None, None, None)):
-        resolved = healthcheck.resolve_device(cfg, input_devices)
+    with patch.object(healthcheck.audio_identity, 'enumerate_and_resolve',
+                      return_value=(None, None, None, None, [(1, 'Mic', 'WASAPI', 0, 'uid-1')])):
+        resolved = healthcheck.resolve_device(cfg)
+    assert resolved is None
+
+
+def test_resolve_device_returns_none_when_no_devices():
+    cfg = _default_cfg()
+    with patch.object(healthcheck.audio_identity, 'enumerate_and_resolve',
+                      return_value=(None, None, None, None, [])):
+        resolved = healthcheck.resolve_device(cfg)
     assert resolved is None
 
 
 def test_run_healthcheck_fails_when_no_input_devices():
     with patch.object(healthcheck, 'load_config', return_value=_default_cfg()), \
          patch.object(healthcheck, 'load_runtime_state', return_value={}), \
-         patch.object(healthcheck, 'enumerate_input_devices', return_value=[]):
+         patch.object(healthcheck, 'resolve_device', return_value=None):
         assert healthcheck.run_healthcheck() is False
 
 
@@ -53,7 +61,6 @@ def test_run_healthcheck_succeeds_on_first_phrase_match():
     audio = np.ones((16000,), dtype=np.float32) * 0.1
     with patch.object(healthcheck, 'load_config', return_value=cfg), \
          patch.object(healthcheck, 'load_runtime_state', return_value={}), \
-         patch.object(healthcheck, 'enumerate_input_devices', return_value=[(1, 'Mic', 'Windows WASAPI', 'uid-1')]), \
          patch.object(healthcheck, 'resolve_device', return_value=(1, 'Mic', 'Windows WASAPI', 'uid-1')), \
          patch.object(healthcheck, 'stream_probe'), \
          patch.object(healthcheck, 'record_phrase', return_value=audio), \
@@ -69,7 +76,6 @@ def test_run_healthcheck_fails_after_phrase_mismatch_attempts():
     audio = np.ones((16000,), dtype=np.float32) * 0.1
     with patch.object(healthcheck, 'load_config', return_value=cfg), \
          patch.object(healthcheck, 'load_runtime_state', return_value={}), \
-         patch.object(healthcheck, 'enumerate_input_devices', return_value=[(1, 'Mic', 'Windows WASAPI', 'uid-1')]), \
          patch.object(healthcheck, 'resolve_device', return_value=(1, 'Mic', 'Windows WASAPI', 'uid-1')), \
          patch.object(healthcheck, 'stream_probe'), \
          patch.object(healthcheck, 'record_phrase', return_value=audio), \
@@ -84,7 +90,6 @@ def test_run_healthcheck_returns_false_when_input_unavailable():
     cfg = _default_cfg()
     with patch.object(healthcheck, 'load_config', return_value=cfg), \
          patch.object(healthcheck, 'load_runtime_state', return_value={}), \
-         patch.object(healthcheck, 'enumerate_input_devices', return_value=[(1, 'Mic', 'Windows WASAPI', 'uid-1')]), \
          patch.object(healthcheck, 'resolve_device', return_value=(1, 'Mic', 'Windows WASAPI', 'uid-1')), \
          patch.object(healthcheck, 'stream_probe'), \
          patch('builtins.input', side_effect=EOFError()):

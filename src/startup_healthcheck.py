@@ -77,27 +77,17 @@ def load_runtime_state():
     return runtime_state.read_runtime_state()
 
 
-def enumerate_input_devices():
-    """Return input device tuples: (index, name, hostapi_name, device_uid)."""
-    devices = audio_identity.enumerate_input_devices(sd)
-    return [(idx, name, hostapi_name, device_uid) for idx, name, hostapi_name, _, device_uid in devices]
-
-
-def resolve_device(cfg, input_devices):
+def resolve_device(cfg):
     """Resolve configured device identity with dock/undock-friendly fallback chain."""
-    saved_name = cfg['AUDIO_DEVICE']
-    saved_hostapi = cfg['AUDIO_DEVICE_HOSTAPI']
-    saved_index = cfg['AUDIO_DEVICE_INDEX']
-    saved_uid = cfg['AUDIO_DEVICE_UID']
-    resolved = audio_identity.resolve_preferred_input_device(
+    idx, name, hostapi_name, uid, devices = audio_identity.enumerate_and_resolve(
         sd,
-        [(idx, name, hostapi_name, None, uid) for idx, name, hostapi_name, uid in input_devices],
-        saved_name=saved_name,
-        saved_hostapi=saved_hostapi,
-        saved_index=saved_index,
-        saved_uid=saved_uid
+        saved_name=cfg['AUDIO_DEVICE'],
+        saved_hostapi=cfg['AUDIO_DEVICE_HOSTAPI'],
+        saved_index=cfg['AUDIO_DEVICE_INDEX'],
+        saved_uid=cfg['AUDIO_DEVICE_UID'],
     )
-    idx, name, hostapi_name, uid = resolved
+    if not devices:
+        return None
     if idx is None:
         return None
     return idx, name, hostapi_name, uid
@@ -194,13 +184,7 @@ def run_healthcheck():
             print('[WARN] Previous run ended in an unhealthy state.')
             print('       This healthcheck will verify if audio is now operational.')
 
-    input_devices = enumerate_input_devices()
-    if not input_devices:
-        print('[FAIL] No input microphones found.')
-        print('       Connect a microphone and try again.')
-        return False
-
-    chosen = resolve_device(cfg, input_devices)
+    chosen = resolve_device(cfg)
     if not chosen:
         print('[FAIL] Could not resolve a usable microphone device.')
         return False
@@ -241,7 +225,7 @@ def run_healthcheck():
             print(f"[FAIL] Recording failed ({type(e).__name__}: {e})")
             return False
 
-        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+        rms = audio_capture.compute_rms(audio) if audio.size else 0.0
         print(f"[INFO] Captured audio RMS: {rms:.6f}")
         if rms < 1e-6:
             print('[WARN] Captured silence. Check mic mute/privacy settings and try again.')

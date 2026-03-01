@@ -56,3 +56,8 @@ def capture_from_stream(
         return np.array([], dtype=np.float32)
 
     return np.concatenate(chunks, axis=0).flatten()
+
+
+def compute_rms(audio):
+    """Compute RMS energy of a float32 audio array."""
+    return float(np.sqrt(np.mean(audio ** 2)))

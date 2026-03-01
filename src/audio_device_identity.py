@@ -213,3 +213,27 @@ def resolve_preferred_input_device(
         return first[0], first[1], first[2], first[4]
 
     return None, None, None, None
+
+
+def enumerate_and_resolve(
+    sd_module,
+    saved_name=None,
+    saved_hostapi=None,
+    saved_index=None,
+    saved_uid=None,
+):
+    """Enumerate input devices and resolve preferred device in one step.
+
+    Returns (index, name, hostapi_name, device_uid, input_devices).
+    index is None when no usable device could be resolved.
+    input_devices is always returned (may be empty).
+    """
+    input_devices = enumerate_input_devices(sd_module)
+    if not input_devices:
+        return None, None, None, None, input_devices
+    resolved = resolve_preferred_input_device(
+        sd_module, input_devices,
+        saved_name=saved_name, saved_hostapi=saved_hostapi,
+        saved_index=saved_index, saved_uid=saved_uid,
+    )
+    return (*resolved, input_devices)

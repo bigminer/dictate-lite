@@ -15,9 +15,6 @@ import config_store
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-# Add src directory to path for config import
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 try:
     import sounddevice as sd
 except ImportError:
@@ -25,57 +22,56 @@ except ImportError:
     print("Run: pip install sounddevice")
     sys.exit(1)
 
-# Load audio device identity from config if available
-try:
-    from config import AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
-except Exception:
-    AUDIO_DEVICE = None
-    AUDIO_DEVICE_HOSTAPI = None
-    AUDIO_DEVICE_INDEX = None
-    AUDIO_DEVICE_UID = None
-
-if isinstance(AUDIO_DEVICE_INDEX, str):
-    stripped = AUDIO_DEVICE_INDEX.strip()
-    AUDIO_DEVICE_INDEX = int(stripped) if stripped.isdigit() else None
-
-if isinstance(AUDIO_DEVICE_UID, str):
-    AUDIO_DEVICE_UID = AUDIO_DEVICE_UID.strip() or None
-
 SAMPLE_RATE = 16000
 AMBIENT_DURATION = 3.0  # seconds
 SPEECH_DURATION = 4.0   # seconds
 
 
-def _enumerate_input_devices():
-    """Return list of input devices as tuples: (index, name, hostapi_name, device_uid)."""
-    devices = audio_identity.enumerate_input_devices(sd)
-    return [(idx, name, hostapi_name, device_uid) for idx, name, hostapi_name, _, device_uid in devices]
+def _load_device_config():
+    """Load saved audio device identity from config.py with safe defaults."""
+    cfg = {'name': None, 'hostapi': None, 'index': None, 'uid': None}
+
+    src_dir = os.path.dirname(os.path.abspath(__file__))
+    if src_dir not in sys.path:
+        sys.path.insert(0, src_dir)
+
+    try:
+        import config as user_config  # type: ignore
+        cfg['name'] = getattr(user_config, 'AUDIO_DEVICE', None)
+        cfg['hostapi'] = getattr(user_config, 'AUDIO_DEVICE_HOSTAPI', None)
+        cfg['index'] = getattr(user_config, 'AUDIO_DEVICE_INDEX', None)
+        cfg['uid'] = getattr(user_config, 'AUDIO_DEVICE_UID', None)
+    except Exception:
+        pass
+
+    if isinstance(cfg['index'], str):
+        stripped = cfg['index'].strip()
+        cfg['index'] = int(stripped) if stripped.isdigit() else None
+    if isinstance(cfg['uid'], str):
+        cfg['uid'] = cfg['uid'].strip() or None
+
+    return cfg
 
 
 def resolve_audio_device():
     """Resolve configured device identity with fallback chain across host APIs."""
-    global AUDIO_DEVICE, AUDIO_DEVICE_HOSTAPI, AUDIO_DEVICE_INDEX, AUDIO_DEVICE_UID
-    input_devices = _enumerate_input_devices()
+    cfg = _load_device_config()
+    idx, name, hostapi_name, uid, devices = audio_identity.enumerate_and_resolve(
+        sd,
+        saved_name=cfg['name'],
+        saved_hostapi=cfg['hostapi'],
+        saved_index=cfg['index'],
+        saved_uid=cfg['uid'],
+    )
 
-    if not input_devices:
+    if not devices:
         print("ERROR: No input devices found on this system")
         sys.exit(1)
-
-    idx, name, hostapi_name, uid = audio_identity.resolve_preferred_input_device(
-        sd,
-        [(d_idx, d_name, d_hostapi, None, d_uid) for d_idx, d_name, d_hostapi, d_uid in input_devices],
-        saved_name=AUDIO_DEVICE,
-        saved_hostapi=AUDIO_DEVICE_HOSTAPI,
-        saved_index=AUDIO_DEVICE_INDEX,
-        saved_uid=AUDIO_DEVICE_UID
-    )
 
     if idx is None:
         print("ERROR: Failed to resolve a usable microphone device")
         sys.exit(1)
 
-    if AUDIO_DEVICE_UID and AUDIO_DEVICE_UID != uid:
-        print(f"  NOTE: Saved AUDIO_DEVICE_UID changed: {AUDIO_DEVICE_UID} -> {uid}")
     print(f"  Using microphone [{idx}] '{name}' ({hostapi_name}) uid={uid}")
     return idx, name
 
@@ -112,11 +108,6 @@ def record_audio(duration, prompt, device_index):
     print(f"  Recording complete! ({duration}s)   ")
 
     return np.asarray(recording, dtype=np.float32).flatten()
-
-
-def calculate_rms(audio):
-    """Calculate RMS level of audio."""
-    return np.sqrt(np.mean(audio ** 2))
 
 
 def calculate_peak(audio):
@@ -171,7 +162,7 @@ def main():
         "STEP 1: Stay quiet. Recording ambient noise...",
         device_index
     )
-    ambient_rms = calculate_rms(ambient_audio)
+    ambient_rms = audio_capture.compute_rms(ambient_audio)
     ambient_peak = calculate_peak(ambient_audio)
 
     print(f"\n  Ambient RMS:  {ambient_rms:.4f}")
@@ -185,7 +176,7 @@ def main():
         "STEP 2: Speak normally. Say: 'Just focus on my voice'",
         device_index
     )
-    speech_rms = calculate_rms(speech_audio)
+    speech_rms = audio_capture.compute_rms(speech_audio)
     speech_peak = calculate_peak(speech_audio)
 
     print(f"\n  Speech RMS:  {speech_rms:.4f}")
