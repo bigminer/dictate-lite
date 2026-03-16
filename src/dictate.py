@@ -870,6 +870,7 @@ MAX_RECORDING_SECONDS = 120
 RECORDING_MONITOR_INTERVAL = 0.05
 IDLE_RECORDING_MONITOR_INTERVAL = 0.20
 HOTKEY_PARTS = [part.strip() for part in HOTKEY.split('+') if part.strip()]
+_HOTKEY_VK_CODES = watchdog_loops._hotkey_parts_to_vk_codes(HOTKEY_PARTS)
 SILENCE_RMS_THRESHOLD = 1e-6
 SILENCE_POWER_THRESHOLD = SILENCE_RMS_THRESHOLD * SILENCE_RMS_THRESHOLD
 
@@ -1000,8 +1001,100 @@ import re as _re
 _SEND_IT_PATTERN = _re.compile(r'[,.\s]*send it[.!]?$', _re.IGNORECASE)
 
 
+def _sendinput_keys(*vk_sequence):
+    """Send key down/up events via Win32 SendInput.
+
+    Each item in *vk_sequence* is (vk_code, is_up).  All events are sent in
+    a single atomic SendInput call for reliability.
+    """
+    import ctypes
+    import ctypes.wintypes
+
+    _INPUT_KEYBOARD = 1
+    _KEYEVENTF_KEYUP = 0x0002
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.wintypes.WORD),
+            ("wScan", ctypes.wintypes.WORD),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("time", ctypes.wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", ctypes.c_long),
+            ("dy", ctypes.c_long),
+            ("mouseData", ctypes.wintypes.DWORD),
+            ("dwFlags", ctypes.wintypes.DWORD),
+            ("time", ctypes.wintypes.DWORD),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.wintypes.DWORD), ("u", _INPUT_UNION)]
+
+    user32 = ctypes.windll.user32
+    events = []
+    for vk, up in vk_sequence:
+        inp = INPUT()
+        inp.type = _INPUT_KEYBOARD
+        inp.u.ki.wVk = vk
+        inp.u.ki.wScan = user32.MapVirtualKeyW(vk, 0) & 0xFF
+        inp.u.ki.dwFlags = _KEYEVENTF_KEYUP if up else 0
+        events.append(inp)
+
+    arr = (INPUT * len(events))(*events)
+    sent = user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
+    if sent != len(events):
+        raise OSError(f"SendInput sent {sent}/{len(events)} events")
+
+
+def _release_all_modifiers_sendinput():
+    """Send KEYUP for all modifier keys via SendInput to clear stuck state."""
+    _sendinput_keys(
+        (0x11, True),   # Ctrl up
+        (0xA2, True),   # Left Ctrl up
+        (0xA3, True),   # Right Ctrl up
+        (0x12, True),   # Alt up
+        (0xA4, True),   # Left Alt up
+        (0xA5, True),   # Right Alt up
+        (0x10, True),   # Shift up
+        (0xA0, True),   # Left Shift up
+        (0xA1, True),   # Right Shift up
+    )
+
+
+def _clipboard_paste():
+    """Simulate Ctrl+V via SendInput to paste clipboard contents."""
+    _sendinput_keys(
+        (0x11, False),  # Ctrl down
+        (0x56, False),  # V down
+        (0x56, True),   # V up
+        (0x11, True),   # Ctrl up
+    )
+    time.sleep(0.02)
+    _release_all_modifiers_sendinput()  # Safety: ensure nothing is stuck
+
+
+def _send_enter_key():
+    """Simulate Enter key via SendInput."""
+    _sendinput_keys((0x0D, False), (0x0D, True))
+
+
 def _inject_text(text):
-    """Type text into the active window. Detects 'send it' command to press Enter."""
+    """Inject text into the active window via clipboard paste (Ctrl+V).
+
+    Tries three methods in order:
+    1. Clipboard paste via SendInput Ctrl+V (bypasses keyboard library)
+    2. Clipboard paste via keyboard.send (uses library's SendInput wrapper)
+    3. keyboard.write character-by-character (original method)
+    Detects 'send it' voice command to press Enter after text.
+    """
     send_enter = bool(_SEND_IT_PATTERN.search(text))
     if send_enter:
         text = _SEND_IT_PATTERN.sub('', text).rstrip()
@@ -1009,13 +1102,59 @@ def _inject_text(text):
 
     if text:
         time.sleep(0.05)
-        _release_modifier_keys()
-        keyboard.write(text, delay=0.01, restore_state_after=False)
-        STATE.total_chars_typed += len(text)
+        # Clear any stuck modifier keys via SendInput before pasting.
+        # Avoids _release_modifier_keys() which uses the keyboard library and
+        # can send orphaned KEYUP events that trigger menu bar activation.
+        _release_all_modifiers_sendinput()
+        time.sleep(0.05)
+
+        # Always put text on clipboard (needed for paste methods, and as manual backup)
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            logger.warning("pyperclip.copy failed", exc_info=True)
+
+        injected = False
+
+        # Method 1: SendInput Ctrl+V
+        if not injected:
+            try:
+                _clipboard_paste()
+                injected = True
+                logger.info(f"Text injected via SendInput Ctrl+V ({len(text)} chars)")
+            except Exception:
+                logger.warning("SendInput Ctrl+V failed", exc_info=True)
+
+        # Method 2: keyboard library Ctrl+V
+        if not injected:
+            try:
+                keyboard.send('ctrl+v')
+                injected = True
+                logger.info(f"Text injected via keyboard.send ctrl+v ({len(text)} chars)")
+            except Exception:
+                logger.warning("keyboard.send ctrl+v failed", exc_info=True)
+
+        # Method 3: keyboard.write (original method)
+        if not injected:
+            try:
+                keyboard.write(text, delay=0.01, restore_state_after=False)
+                injected = True
+                logger.info(f"Text injected via keyboard.write ({len(text)} chars)")
+            except Exception:
+                logger.error("All text injection methods failed", exc_info=True)
+
+        if injected:
+            STATE.total_chars_typed += len(text)
 
     if send_enter:
-        time.sleep(0.05)
-        keyboard.press_and_release('enter')
+        time.sleep(0.10)
+        try:
+            _send_enter_key()
+        except Exception:
+            try:
+                keyboard.press_and_release('enter')
+            except Exception:
+                logger.error("Failed to send Enter key", exc_info=True)
 
 
 def _transcribe_and_emit_text(audio_data):
@@ -1089,14 +1228,25 @@ def on_hotkey_release():
 
 
 def _is_hotkey_currently_pressed():
-    """Best-effort hotkey state check for release-callback fallback logic."""
+    """Best-effort hotkey state check for release-callback fallback logic.
+
+    Primary: keyboard.is_pressed (works when the library hook is alive,
+    which is required because suppress=True hides keys from GetAsyncKeyState).
+    Fallback: GetAsyncKeyState (works when the hook is dead and keys aren't
+    suppressed).
+    """
     if not HOTKEY_PARTS:
         return True
     try:
         return all(keyboard.is_pressed(key) for key in HOTKEY_PARTS)
-    except Exception as e:
-        logger.debug(f"Hotkey state check failed: {e}")
-        return True
+    except Exception:
+        pass
+    if _HOTKEY_VK_CODES is not None:
+        try:
+            return watchdog_loops._are_all_vk_pressed(_HOTKEY_VK_CODES)
+        except Exception:
+            pass
+    return True
 
 
 def _release_modifier_keys():
@@ -1240,6 +1390,7 @@ def _keyboard_hook_watchdog():
         shutdown_event=STATE.shutdown_event,
         hotkey_parts=HOTKEY_PARTS,
         rehook_fn=_rehook_hotkeys,
+        start_recording_fn=start_recording,
         logger=logger,
     )
 
