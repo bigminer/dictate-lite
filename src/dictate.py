@@ -1087,12 +1087,12 @@ def _send_enter_key():
 
 
 def _inject_text(text):
-    """Inject text into the active window via clipboard paste (Ctrl+V).
+    """Inject text into the active window.
 
-    Tries three methods in order:
-    1. Clipboard paste via SendInput Ctrl+V (bypasses keyboard library)
-    2. Clipboard paste via keyboard.send (uses library's SendInput wrapper)
-    3. keyboard.write character-by-character (original method)
+    Tries keyboard.write first (character-by-character with 10ms delay) because
+    it works universally including terminals/consoles that don't accept Ctrl+V.
+    Falls back to clipboard paste via SendInput if keyboard.write throws.
+    Text is always copied to the clipboard as a manual-paste backup.
     Detects 'send it' voice command to press Enter after text.
     """
     send_enter = bool(_SEND_IT_PATTERN.search(text))
@@ -1102,13 +1102,11 @@ def _inject_text(text):
 
     if text:
         time.sleep(0.05)
-        # Clear any stuck modifier keys via SendInput before pasting.
-        # Avoids _release_modifier_keys() which uses the keyboard library and
-        # can send orphaned KEYUP events that trigger menu bar activation.
+        # Clear any stuck modifier keys via SendInput before typing.
         _release_all_modifiers_sendinput()
         time.sleep(0.05)
 
-        # Always put text on clipboard (needed for paste methods, and as manual backup)
+        # Always put text on clipboard as a manual-paste backup
         try:
             pyperclip.copy(text)
         except Exception:
@@ -1116,7 +1114,16 @@ def _inject_text(text):
 
         injected = False
 
-        # Method 1: SendInput Ctrl+V
+        # Method 1: keyboard.write (10ms/char delay — works in terminals)
+        if not injected:
+            try:
+                keyboard.write(text, delay=0.01, restore_state_after=False)
+                injected = True
+                logger.info(f"Text injected via keyboard.write ({len(text)} chars)")
+            except Exception:
+                logger.warning("keyboard.write failed", exc_info=True)
+
+        # Method 2: SendInput Ctrl+V (clipboard paste — works in GUI apps)
         if not injected:
             try:
                 _clipboard_paste()
@@ -1124,24 +1131,6 @@ def _inject_text(text):
                 logger.info(f"Text injected via SendInput Ctrl+V ({len(text)} chars)")
             except Exception:
                 logger.warning("SendInput Ctrl+V failed", exc_info=True)
-
-        # Method 2: keyboard library Ctrl+V
-        if not injected:
-            try:
-                keyboard.send('ctrl+v')
-                injected = True
-                logger.info(f"Text injected via keyboard.send ctrl+v ({len(text)} chars)")
-            except Exception:
-                logger.warning("keyboard.send ctrl+v failed", exc_info=True)
-
-        # Method 3: keyboard.write (original method)
-        if not injected:
-            try:
-                keyboard.write(text, delay=0.01, restore_state_after=False)
-                injected = True
-                logger.info(f"Text injected via keyboard.write ({len(text)} chars)")
-            except Exception:
-                logger.error("All text injection methods failed", exc_info=True)
 
         if injected:
             STATE.total_chars_typed += len(text)
