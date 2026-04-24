@@ -8,3 +8,4 @@ edge-tts>=7.2.7
 pystray>=0.19.5
 Pillow>=12.1.0
 noisereduce>=3.0.3
+openwakeword>=0.6.0

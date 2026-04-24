@@ -224,6 +224,16 @@ if "!LANG_CHOICE!"=="6" (
     set /p "LANGUAGE=Enter language code: "
 )
 
+echo.
+echo  --- Open Mic Mode ---
+echo  Optional hands-free mode: say "hey Jarvis" to start recording.
+echo  Silence ends the segment automatically.
+echo.
+
+set "WAKE_WORD_ENABLED=False"
+set /p "OPEN_MIC_CHOICE=Start Open Mic Mode at launch? [y/N]: "
+if /i "!OPEN_MIC_CHOICE!"=="y" set "WAKE_WORD_ENABLED=True"
+
 :: Determine device setting
 if "!USE_CPU!"=="1" (
     set "DEVICE=cpu"
@@ -281,6 +291,13 @@ echo Writing configuration...
     echo.
     echo # Log level: DEBUG, INFO, WARNING, ERROR
     echo LOG_LEVEL = 'INFO'
+    echo.
+    echo # Open mic / wake word mode
+    echo WAKE_WORD_ENABLED = !WAKE_WORD_ENABLED!
+    echo WAKE_WORD_MODEL = 'hey_jarvis_v0.1'
+    echo WAKE_WORD_THRESHOLD = 0.5
+    echo WAKE_WORD_SILENCE_TIMEOUT_S = 2.0
+    echo WAKE_WORD_OUTPUT_FILE = None
 ) > src\config.py
 
 :: Check if model changed and needs download
@@ -337,6 +354,18 @@ if errorlevel 1 (
 )
 
 :install_complete
+
+if /i "!WAKE_WORD_ENABLED!"=="True" (
+    echo.
+    echo  Downloading OpenWakeWord model assets...
+    python -c "from openwakeword.utils import download_models; download_models(['hey_jarvis_v0.1']); print('  Open mic model ready.')"
+    if errorlevel 1 (
+        echo.
+        echo  WARNING: OpenWakeWord model download may have failed.
+        echo  The app will retry on first run.
+        echo.
+    )
+)
 
 :: Generate application icon if it doesn't exist
 if not exist voice-dictation.ico (

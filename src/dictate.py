@@ -1251,10 +1251,19 @@ def _load_wake_word_model():
         return _oww_model
     try:
         from openwakeword.model import Model
-        _oww_model = Model(
-            wakeword_models=[WAKE_WORD_MODEL],
-            inference_framework='onnx',
-        )
+        try:
+            _oww_model = Model(
+                wakeword_models=[WAKE_WORD_MODEL],
+                inference_framework='onnx',
+            )
+        except Exception as first_exc:
+            logger.warning(f'OpenWakeWord model load failed; downloading model assets: {first_exc}')
+            from openwakeword.utils import download_models
+            download_models([WAKE_WORD_MODEL])
+            _oww_model = Model(
+                wakeword_models=[WAKE_WORD_MODEL],
+                inference_framework='onnx',
+            )
         logger.info(f'OpenWakeWord model loaded: {WAKE_WORD_MODEL}')
         return _oww_model
     except Exception as exc:

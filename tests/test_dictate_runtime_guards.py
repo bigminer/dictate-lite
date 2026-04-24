@@ -258,6 +258,28 @@ def test_processing_flag_clears_on_transcription_exception():
     assert module.STATE.is_recording is False
 
 
+def test_load_wake_word_model_downloads_missing_assets_and_retries():
+    module, _ = _import_dictate_module()
+    model_instances = [FileNotFoundError('missing model'), MagicMock(models={'hey_jarvis_v0.1': object()})]
+    download_mock = MagicMock()
+
+    def fake_model(**kwargs):
+        result = model_instances.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with patch.dict(sys.modules, {
+        'openwakeword': MagicMock(),
+        'openwakeword.model': SimpleNamespace(Model=fake_model),
+        'openwakeword.utils': SimpleNamespace(download_models=download_mock),
+    }):
+        model = module._load_wake_word_model()
+
+    assert model is not None
+    download_mock.assert_called_once_with([module.WAKE_WORD_MODEL])
+
+
 def test_switch_and_reopen_paths_obey_shared_lock_contention():
     module, _ = _import_dictate_module()
     manager = MagicMock()
