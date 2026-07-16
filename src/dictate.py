@@ -1203,6 +1203,15 @@ def stop_recording_and_transcribe():
     if recorded_frames is None:
         return
 
+    # Shut the door the hotkey opened: suppress=True eats the hotkey's key-up
+    # events, so the OS still believes the modifiers are held. Clear them
+    # immediately — the previous cleanup ran only on the injection path, so
+    # no-text outcomes (audio too quiet, no speech) left Ctrl stuck down.
+    try:
+        _release_all_modifiers_sendinput()
+    except Exception:
+        logger.warning('Modifier cleanup after hotkey release failed', exc_info=True)
+
     try:
         _set_processing_icon()
         logger.info("Processing audio...")
