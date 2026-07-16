@@ -165,16 +165,25 @@ def run_stream_health_watchdog(
     watchdog_poll_s=5,
     backoff_max_s=300,
     re_resolve_after_failures=3,
+    on_persistent_failure=None,
+    on_recovery=None,
+    alert_after_failures=5,
 ):
-    """Monitor stream/device health and attempt automatic recovery."""
+    """Monitor stream/device health and attempt automatic recovery.
+
+    *on_persistent_failure* is invoked once per failure streak when
+    *alert_after_failures* consecutive recovery attempts have failed;
+    *on_recovery* is invoked when a reopen finally succeeds after that alert.
+    """
     logger.info('Stream health watchdog started')
 
     consecutive_failures = 0
     next_retry_time = 0.0
+    alerted = False
 
     def _on_recovery_failure():
         """Shared handler for reopen failures: backoff, then re-resolve after threshold."""
-        nonlocal consecutive_failures, next_retry_time
+        nonlocal consecutive_failures, next_retry_time, alerted
         consecutive_failures += 1
         backoff_s = min(watchdog_poll_s * (2 ** consecutive_failures), backoff_max_s)
         next_retry_time = time.time() + backoff_s
@@ -182,12 +191,32 @@ def run_stream_health_watchdog(
             f'Recovery failed ({consecutive_failures} consecutive). '
             f'Next retry in {backoff_s}s'
         )
+        if consecutive_failures >= alert_after_failures and not alerted:
+            alerted = True
+            if on_persistent_failure:
+                try:
+                    on_persistent_failure(consecutive_failures)
+                except Exception as exc:
+                    logger.error(f'on_persistent_failure callback failed: {exc}')
         if consecutive_failures >= re_resolve_after_failures:
             logger.info('Multiple consecutive recovery failures. Re-resolving device...')
             if check_microphone():
                 consecutive_failures = 0
                 next_retry_time = 0.0
                 logger.info('Device re-resolved. Will retry immediately.')
+
+    def _on_recovery_success():
+        """Shared handler for reopen successes: reset backoff, clear any alert."""
+        nonlocal consecutive_failures, next_retry_time, alerted
+        consecutive_failures = 0
+        next_retry_time = 0.0
+        if alerted:
+            alerted = False
+            if on_recovery:
+                try:
+                    on_recovery()
+                except Exception as exc:
+                    logger.error(f'on_recovery callback failed: {exc}')
 
     while not shutdown_event.is_set():
         shutdown_event.wait(watchdog_poll_s)
@@ -217,7 +246,8 @@ def run_stream_health_watchdog(
                     if state.tray_icon:
                         state.tray_icon.update_menu()
                     if state.audio_stream is None or state.active_mic_index != previous_index:
-                        reopen_audio_stream_fn('device topology change')
+                        if reopen_audio_stream_fn('device topology change'):
+                            _on_recovery_success()
                 else:
                     logger.warning('No usable microphone after topology change')
                     update_tray_icon('gray', 'Voice Dictation - No microphone (see log)')
@@ -243,8 +273,7 @@ def run_stream_health_watchdog(
             if time.time() < next_retry_time:
                 continue
             if reopen_audio_stream_fn('stream missing'):
-                consecutive_failures = 0
-                next_retry_time = 0.0
+                _on_recovery_success()
             else:
                 _on_recovery_failure()
             continue
@@ -258,8 +287,7 @@ def run_stream_health_watchdog(
             reason = 'stream inactive' if not stream_active else 'no callbacks for >10s'
             logger.error(f'Audio stream appears dead ({reason}). Attempting recovery...')
             if reopen_audio_stream_fn(reason):
-                consecutive_failures = 0
-                next_retry_time = 0.0
+                _on_recovery_success()
             else:
                 _on_recovery_failure()
 
@@ -330,6 +358,7 @@ def run_keyboard_hook_watchdog(
     rehook_fn,
     logger,
     start_recording_fn=None,
+    on_hook_suspect=None,
     poll_interval_s=0.1,
     recording_start_threshold_s=0.15,
     detection_threshold_s=1.0,
@@ -345,7 +374,18 @@ def run_keyboard_hook_watchdog(
        the hook is assumed dead and re-registered.
     3. **Proactive rehook**: Every *proactive_rehook_interval_s* seconds the
        hotkeys are unconditionally re-registered as cheap insurance.
+
+    *on_hook_suspect* is invoked with a reason string whenever strategy 1 or 2
+    fires — i.e. whenever there is direct evidence the hook is dead.
     """
+
+    def _notify_hook_suspect(reason):
+        if on_hook_suspect is None:
+            return
+        try:
+            on_hook_suspect(reason)
+        except Exception as exc:
+            logger.error(f'Keyboard hook watchdog: on_hook_suspect callback failed: {exc}')
     if sys.platform != 'win32':
         logger.info('Keyboard hook watchdog: not Windows, skipping')
         return
@@ -418,6 +458,9 @@ def run_keyboard_hook_watchdog(
                         poll_triggered_recording = True
                     except Exception as exc:
                         logger.error(f'Keyboard hook watchdog: start recording failed: {exc}')
+                    _notify_hook_suspect(
+                        f'hotkey held {held_s:.2f}s with no callback; recording started via polling'
+                    )
 
                 # Rehook after longer hold
                 if held_s >= detection_threshold_s:
@@ -431,6 +474,9 @@ def run_keyboard_hook_watchdog(
                         last_proactive_rehook = now
                     except Exception as exc:
                         logger.error(f'Keyboard hook watchdog: reactive rehook failed: {exc}')
+                    _notify_hook_suspect(
+                        f'hotkey held {held_s:.1f}s with no callback; hooks re-registered'
+                    )
                     pressed_since = 0.0
         else:
             pressed_since = 0.0

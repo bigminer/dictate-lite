@@ -471,6 +471,7 @@ def create_tray_image(color='green'):
         'yellow': (234, 179, 8),   # Processing
         'gray': (156, 163, 175),   # Disabled/loading
         'blue': (59, 130, 246),    # Wake word listening
+        'orange': (249, 115, 22),  # Degraded - a failure was detected (see log)
     }
     fill_color = colors.get(color, colors['green'])
 
@@ -892,8 +893,21 @@ if not HOTKEY_PARTS:
     logger.warning(f"HOTKEY '{HOTKEY}' could not be parsed into keys")
 
 
+def _degraded_title():
+    """Tray tooltip describing which failure is currently latched."""
+    reasons = []
+    if STATE.hook_degraded:
+        reasons.append('hotkey hook died')
+    if STATE.audio_degraded:
+        reasons.append('mic recovery failing')
+    return 'Voice Dictation - DEGRADED: ' + ', '.join(reasons) + ' (see log)'
+
+
 def _set_ready_icon(title=None):
-    """Set tray icon to ready (green)."""
+    """Set tray icon to ready (green), or degraded (orange) while a failure is latched."""
+    if STATE.hook_degraded or STATE.audio_degraded:
+        update_tray_icon('orange', _degraded_title())
+        return
     update_tray_icon('green', title or READY_TITLE)
 
 
@@ -1206,11 +1220,16 @@ def stop_recording_and_transcribe():
 def on_hotkey_press():
     """Called when hotkey is pressed."""
     STATE.last_hotkey_callback_time = time.time()
+    logger.debug('Hotkey press callback')
+    if STATE.hook_degraded:
+        STATE.hook_degraded = False
+        logger.info('Keyboard hook recovered — press callback received')
     start_recording()
 
 
 def on_hotkey_release():
     """Called when hotkey is released."""
+    logger.debug('Hotkey release callback')
     is_recording, _, _ = _recording_snapshot()
     if is_recording:
         stop_recording_and_transcribe()
@@ -1380,6 +1399,7 @@ def _keyboard_hook_watchdog():
         hotkey_parts=HOTKEY_PARTS,
         rehook_fn=_rehook_hotkeys,
         start_recording_fn=start_recording,
+        on_hook_suspect=_on_hook_suspect,
         logger=logger,
     )
 
@@ -1418,6 +1438,51 @@ def _play_tone(freq1, freq2, duration_ms=80):
         winsound.Beep(freq1, duration_ms)
         winsound.Beep(freq2, duration_ms)
     threading.Thread(target=_beep, daemon=True).start()
+
+
+def _play_error_tone():
+    _play_tone(300, 200, 150)  # low descending buzz: a failure was detected
+
+
+_HOOK_ALERT_DEBOUNCE_S = 30
+_last_hook_alert_time = 0.0
+
+
+def _on_hook_suspect(reason):
+    """Keyboard hook watchdog found direct evidence the hook is dead.
+
+    Latch the degraded state (orange tray icon until a real callback proves
+    the hook alive again) and buzz so the failure is never silent.
+    """
+    global _last_hook_alert_time
+    STATE.hook_degraded = True
+    logger.error(f'Keyboard hook suspect: {reason}')
+    now = time.time()
+    if now - _last_hook_alert_time >= _HOOK_ALERT_DEBOUNCE_S:
+        _last_hook_alert_time = now
+        _play_error_tone()
+    if STATE.model is not None and not STATE.is_recording and not STATE.is_processing:
+        _set_ready_icon()
+
+
+def _on_audio_persistent_failure(consecutive_failures):
+    """Audio recovery keeps failing — go loud instead of retrying silently."""
+    STATE.audio_degraded = True
+    logger.error(
+        f'Audio recovery failing persistently ({consecutive_failures} consecutive) — '
+        'entering degraded state'
+    )
+    _play_error_tone()
+    if STATE.model is not None and not STATE.is_recording and not STATE.is_processing:
+        _set_ready_icon()
+
+
+def _on_audio_recovered():
+    """Audio stream reopened after a persistent-failure alert."""
+    STATE.audio_degraded = False
+    logger.info('Audio stream recovered — leaving degraded state')
+    if STATE.model is not None and not STATE.is_recording and not STATE.is_processing:
+        _set_ready_icon()
 
 
 def _wake_word_start_recording():
@@ -1616,6 +1681,8 @@ def stream_health_watchdog():
         update_tray_icon=update_tray_icon,
         write_runtime_state=_write_runtime_state,
         get_stream_manager=_get_stream_manager,
+        on_persistent_failure=_on_audio_persistent_failure,
+        on_recovery=_on_audio_recovered,
         logger=logger,
     )
 
