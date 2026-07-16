@@ -1235,6 +1235,30 @@ def on_hotkey_release():
         stop_recording_and_transcribe()
 
 
+def _on_hotkey_event(event):
+    """Dispatch raw hook_key down/up events to the press/release handlers."""
+    if event.event_type == keyboard.KEY_DOWN:
+        on_hotkey_press()
+    elif event.event_type == keyboard.KEY_UP:
+        on_hotkey_release()
+
+
+def _register_hotkey():
+    """Register keyboard handlers for the configured hotkey.
+
+    Bare single keys (e.g. 'right ctrl') must use hook_key: the keyboard
+    library's add_hotkey never fires callbacks for a lone modifier — every
+    press gets rescued by the polling watchdog instead (0.22s late, alarms
+    on each press). hook_key delivers raw down/up events for any key.
+    Multi-key combos keep the add_hotkey press/release pair.
+    """
+    if len(HOTKEY_PARTS) == 1:
+        keyboard.hook_key(HOTKEY, _on_hotkey_event, suppress=True)
+    else:
+        keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
+        keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
+
+
 def _is_hotkey_currently_pressed():
     """Best-effort hotkey state check for release-callback fallback logic.
 
@@ -1340,16 +1364,14 @@ def _rehook_hotkeys():
     (WH_KEYBOARD_LL) silently dies, or proactively as scheduled insurance.
     """
     keyboard.unhook_all()
-    keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
-    keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
+    _register_hotkey()
     logger.info(f"Hotkeys re-registered: {HOTKEY}")
 
 
 def run_dictation_loop():
     """Run the main dictation loop (hotkey callbacks + watchdogs)."""
     logger.info(f"Registering hotkey: {HOTKEY}")
-    keyboard.add_hotkey(HOTKEY, on_hotkey_press, suppress=True, trigger_on_release=False)
-    keyboard.add_hotkey(HOTKEY, on_hotkey_release, suppress=True, trigger_on_release=True)
+    _register_hotkey()
     logger.info("Hotkey registered. Ready for dictation!")
 
     recording_wd = threading.Thread(target=_recording_state_watchdog, daemon=True)
