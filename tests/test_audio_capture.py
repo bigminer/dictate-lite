@@ -58,6 +58,16 @@ def test_probe_input_stream_opens_and_closes():
     assert sd.probe_stream.closed is True
 
 
+def test_compute_rms_returns_expected_value():
+    audio = np.array([0.3, -0.3, 0.3, -0.3], dtype=np.float32)
+    assert abs(audio_capture.compute_rms(audio) - 0.3) < 1e-6
+
+
+def test_compute_rms_returns_zero_for_silence():
+    audio = np.zeros(100, dtype=np.float32)
+    assert audio_capture.compute_rms(audio) == 0.0
+
+
 def test_capture_from_stream_returns_flattened_audio():
     sd = _CaptureSoundDevice()
     audio = audio_capture.capture_from_stream(

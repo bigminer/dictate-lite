@@ -103,3 +103,24 @@ def test_resolve_preferred_input_device_falls_back_to_default():
     assert resolved[0] == 1
     assert resolved[1] == 'USB Mic'
 
+
+def test_enumerate_and_resolve_returns_device_and_list():
+    idx, name, hostapi, uid, devices = adi.enumerate_and_resolve(
+        _FakeSoundDevice,
+        saved_name='USB Mic',
+    )
+    assert idx == 1
+    assert name == 'USB Mic'
+    assert len(devices) == 2
+
+
+def test_enumerate_and_resolve_returns_none_when_no_match():
+    idx, name, hostapi, uid, devices = adi.enumerate_and_resolve(
+        _FakeSoundDevice,
+        saved_name='Nonexistent',
+        saved_uid='bad-uid',
+    )
+    # Falls back to default device (index 1 = USB Mic per _FakeSoundDevice)
+    assert idx == 1
+    assert len(devices) == 2
+

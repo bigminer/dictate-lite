@@ -329,19 +329,22 @@ def run_keyboard_hook_watchdog(
     hotkey_parts,
     rehook_fn,
     logger,
-    poll_interval_s=0.5,
+    start_recording_fn=None,
+    poll_interval_s=0.1,
+    recording_start_threshold_s=0.15,
     detection_threshold_s=1.0,
     proactive_rehook_interval_s=600,
 ):
     """Detect and recover from silently-dead Windows keyboard hooks.
 
-    Two recovery strategies:
-    1. **Reactive**: Uses GetAsyncKeyState to detect when the hotkey is
-       physically held but no callback fires.  If the keys are held for
-       *detection_threshold_s* while the app is idle (not recording/processing),
+    Three strategies:
+    1. **Direct recording**: Uses GetAsyncKeyState to detect when the hotkey is
+       physically held but no callback fires.  After *recording_start_threshold_s*
+       the watchdog starts recording directly, bypassing the dead hook.
+    2. **Reactive rehook**: If the keys are held for *detection_threshold_s*,
        the hook is assumed dead and re-registered.
-    2. **Proactive**: Every *proactive_rehook_interval_s* seconds the hotkeys
-       are unconditionally re-registered as cheap insurance.
+    3. **Proactive rehook**: Every *proactive_rehook_interval_s* seconds the
+       hotkeys are unconditionally re-registered as cheap insurance.
     """
     if sys.platform != 'win32':
         logger.info('Keyboard hook watchdog: not Windows, skipping')
@@ -361,6 +364,7 @@ def run_keyboard_hook_watchdog(
     )
 
     pressed_since = 0.0
+    poll_triggered_recording = False
     last_proactive_rehook = time.time()
 
     while not shutdown_event.is_set():
@@ -386,10 +390,11 @@ def run_keyboard_hook_watchdog(
         if vk_codes is None:
             continue
 
-        # Skip if the app is busy (recording or processing) — the hook is
-        # clearly working if we got into that state.
+        # Skip if the app is busy (recording or processing) — either the
+        # hook worked or the poll already triggered recording.
         if state.is_recording or state.is_processing:
             pressed_since = 0.0
+            poll_triggered_recording = False
             continue
 
         all_pressed = _are_all_vk_pressed(vk_codes)
@@ -397,18 +402,37 @@ def run_keyboard_hook_watchdog(
         if all_pressed:
             if pressed_since == 0.0:
                 pressed_since = now
-            elif (now - pressed_since) >= detection_threshold_s:
-                logger.warning(
-                    f'Keyboard hook watchdog: hotkey held for '
-                    f'{now - pressed_since:.1f}s with no callback — hook appears dead. Rehooking...'
-                )
-                try:
-                    rehook_fn()
-                    state.hotkey_rehook_count += 1
-                    last_proactive_rehook = now
-                except Exception as exc:
-                    logger.error(f'Keyboard hook watchdog: reactive rehook failed: {exc}')
-                pressed_since = 0.0
+            else:
+                held_s = now - pressed_since
+
+                # Start recording directly if hook isn't firing
+                if (start_recording_fn
+                        and held_s >= recording_start_threshold_s
+                        and not poll_triggered_recording):
+                    logger.info(
+                        'Keyboard hook watchdog: hotkey detected via polling '
+                        f'({held_s:.2f}s held), starting recording directly'
+                    )
+                    try:
+                        start_recording_fn()
+                        poll_triggered_recording = True
+                    except Exception as exc:
+                        logger.error(f'Keyboard hook watchdog: start recording failed: {exc}')
+
+                # Rehook after longer hold
+                if held_s >= detection_threshold_s:
+                    logger.warning(
+                        f'Keyboard hook watchdog: hotkey held for '
+                        f'{held_s:.1f}s with no callback — rehooking'
+                    )
+                    try:
+                        rehook_fn()
+                        state.hotkey_rehook_count += 1
+                        last_proactive_rehook = now
+                    except Exception as exc:
+                        logger.error(f'Keyboard hook watchdog: reactive rehook failed: {exc}')
+                    pressed_since = 0.0
         else:
             pressed_since = 0.0
+            poll_triggered_recording = False
 
