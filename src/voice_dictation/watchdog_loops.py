@@ -307,6 +307,7 @@ _VK_MAP = {
     'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
     'caps lock': 0x14, 'num lock': 0x90, 'scroll lock': 0x91,
     'print screen': 0x2C, 'pause': 0x13,
+    '\\': 0xDC,  # VK_OEM_5 (backslash on US layouts)
 }
 
 # F1-F24

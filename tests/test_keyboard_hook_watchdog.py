@@ -6,7 +6,14 @@ import time
 from types import SimpleNamespace
 
 import voice_dictation.watchdog_loops as watchdog_loops
-from voice_dictation.watchdog_loops import run_keyboard_hook_watchdog
+from voice_dictation.watchdog_loops import (
+    _hotkey_parts_to_vk_codes,
+    run_keyboard_hook_watchdog,
+)
+
+
+def test_right_ctrl_backslash_combo_maps_to_vk_codes():
+    assert _hotkey_parts_to_vk_codes(['right ctrl', '\\']) == [0xA3, 0xDC]
 
 
 def _make_state():
