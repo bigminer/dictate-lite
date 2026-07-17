@@ -10,8 +10,13 @@ voice-dictation/
 |-- src/
 |   |-- dictate.py                 # Runtime orchestrator + compatibility facade
 |   |-- voice_dictation/
+|   |   |-- win_hotkey.py          # Native Win32 RegisterHotKey detection (parse + listener thread)
 |   |   |-- recording_pipeline.py  # Extracted recording/transcription prep helpers
-|   |   |-- watchdog_loops.py      # Extracted recording + stream watchdog loops
+|   |   |-- watchdog_loops.py      # Recording + stream + keyboard-hook watchdog loops, VK map
+|   |   |-- wake_word_listener.py  # Wake word detection loop + energy silence timeout
+|   |   |-- shared_audio_buffer.py # Thread-safe int16 frame FIFO (callback -> listener)
+|   |   |-- wake_word_mode.py      # Wake word mode enable/disable/toggle state
+|   |   |-- transcription_file_writer.py # Optional plain-text transcription log
 |   |-- startup_healthcheck.py     # Startup/on-demand operational check
 |   |-- calibrate.py               # Noise gate calibration workflow
 |   |-- diagnostics.py             # Log + state analyzer
@@ -31,6 +36,13 @@ voice-dictation/
 |-- tests/
 |   |-- test_dictate.py
 |   |-- test_dictate_runtime_guards.py
+|   |-- test_win_hotkey.py
+|   |-- test_hotkey_registration.py
+|   |-- test_keyboard_hook_watchdog.py
+|   |-- test_stream_failure_alerts.py
+|   |-- test_watchdog_recovery.py
+|   |-- test_wake_word_listener.py
+|   |-- test_wake_word_components.py
 |   |-- test_startup_healthcheck.py
 |   |-- test_calibrate.py
 |   |-- test_diagnostics.py
@@ -73,8 +85,10 @@ start-dictation.bat
   +--> start pythonw src/dictate.py
           |
           +--> pystray (tray icon + menu)
-          +--> keyboard (global hotkey + text injection)
+          +--> Win32 RegisterHotKey via voice_dictation/win_hotkey.py (hotkey detection)
+          +--> keyboard (text injection; hook-based detection only as fallback)
           +--> sounddevice InputStream (live callback)
+          +--> openwakeword ONNX (optional open mic wake word, CPU)
           +--> faster-whisper (transcription)
           +--> reads/writes src/config.py (device identity)
           +--> writes %LOCALAPPDATA%\VoiceDictation\state.json (lifecycle/status)
@@ -89,13 +103,24 @@ dictate.py:
   live stream callback, restart handoff, runtime state updates,
   and wrappers around extracted pipeline/watchdog modules.
 
+voice_dictation/win_hotkey.py:
+  Hotkey combo -> (MOD_* flags, VK) parsing and the RegisterHotKey
+  listener thread: GetMessageW loop, WM_HOTKEY -> on_press, polled
+  GetAsyncKeyState release detection -> on_release.
+
 voice_dictation/recording_pipeline.py:
   Recording -> processing transition, audio validation/gating,
   and transcription/sanitization timing payload generation.
 
 voice_dictation/watchdog_loops.py:
   Recording watchdog loop, microphone self-test, stream reopen helper,
-  and stream health watchdog loop with exponential backoff.
+  stream health watchdog loop with exponential backoff + failure alerts,
+  keyboard hook watchdog (polling rescue, reactive/proactive re-register),
+  and the VK code map shared with win_hotkey.
+
+voice_dictation/wake_word_listener.py + shared_audio_buffer.py + wake_word_mode.py:
+  Open mic pipeline: callback feeds int16 FIFO, listener runs OpenWakeWord
+  predict, energy-based silence timeout ends segments; mode toggle state.
 
 startup_healthcheck.py:
   Pre-launch mic + transcription verification and guided user check.
@@ -135,6 +160,14 @@ dictate.py
   -> audio_stream_manager
   -> voice_dictation.recording_pipeline
   -> voice_dictation.watchdog_loops
+  -> voice_dictation.win_hotkey
+  -> voice_dictation.shared_audio_buffer
+  -> voice_dictation.wake_word_mode
+  -> voice_dictation.wake_word_listener (lazy, at listener start)
+  -> voice_dictation.transcription_file_writer (lazy, at first write)
+
+voice_dictation/win_hotkey.py
+  -> voice_dictation.watchdog_loops (VK map)
 
 startup_healthcheck.py
   -> audio_device_identity
@@ -168,13 +201,24 @@ init_audio_and_dictation()
   -> open stream via AudioStreamManager.open()
   -> write runtime_state = ready
   -> start stream_health_watchdog thread
-  -> register hotkeys + run main wait loop
+  -> _register_hotkey() + watchdog threads + main wait loop
+
+_register_hotkey()
+  -> win_hotkey.parse_hotkey(HOTKEY_PARTS)
+     parses?  -> WinHotkeyListener.start() on dedicated thread
+                 RegisterHotKey OK   -> native path active
+                 RegisterHotKey FALSE-> error tone + orange degraded latch,
+                                        fall through to keyboard-lib hooks
+     bare modifier / unmappable -> keyboard-lib hooks
+        single key -> keyboard.hook_key(suppress=True)
+        combo      -> keyboard.add_hotkey press/release pair (suppress=True)
 ```
 
 ### Recording and Transcription Pipeline
 
 ```text
-Hotkey press
+Hotkey press (WM_HOTKEY on win-hotkey thread, or fallback hook callback,
+              or keyboard-hook watchdog polling rescue)
   -> start_recording()
      -> set STATE.is_recording = True
      -> tray red
@@ -184,7 +228,9 @@ audio_callback()
   -> update last_callback_time
   -> update silence_flag
 
-Hotkey release (or fallback watchdog detects key up)
+Hotkey release (win-hotkey release poll: any combo key up via
+                GetAsyncKeyState; or fallback hook release callback;
+                or recording watchdog release fallback)
   -> stop_recording_and_transcribe()
       -> set processing state + tray yellow
       -> voice_dictation.recording_pipeline.prepare_audio_for_transcription()
@@ -199,6 +245,26 @@ Hotkey release (or fallback watchdog detects key up)
          - optional clipboard copy
          - keyboard.write()
       -> finish -> tray green
+```
+
+### Open Mic / Wake Word Flow (optional, tray toggle)
+
+```text
+audio_callback() (when mode enabled)
+  -> SharedAudioBuffer.put(int16 frames)
+
+run_wake_word_listener() thread
+  -> OpenWakeWord predict per frame (CPU, ONNX)
+  -> score >= threshold
+     -> start-recording callback (ascending tone, tray red)
+     -> frames accumulate; RMS energy tracks speech
+  -> silence_timeout_s of low energy
+     -> stop callback (descending tone)
+     -> background thread runs the same Whisper pipeline as hotkey mode
+  -> optional transcription_file_writer append per segment
+
+Hotkey and wake word modes coexist; wake word activation is ignored
+while a hotkey recording/processing cycle is in flight.
 ```
 
 ## 6) Restart Handoff Flow
@@ -254,10 +320,19 @@ Audio pipeline:
   silence_flag, last_callback_time, audio_stream
 
 Device identity:
-  active_mic_name, active_mic_index, active_mic_hostapi
+  active_mic_name, active_mic_index, active_mic_hostapi,
+  last_device_topology_signature
 
 Service:
   model, tray_icon, tray_color, tray_title, shutdown_event, lock
+
+Health/degradation:
+  hook_degraded, audio_degraded, hotkey_rehook_count,
+  last_hotkey_callback_time
+
+Session metrics:
+  session_id, utterance_count, total_recording_ms, total_chars_typed,
+  device_fallback_count, transcription_errors
 ```
 
 ### Persistent (`%LOCALAPPDATA%\VoiceDictation\state.json`)
@@ -310,6 +385,13 @@ External user-visible actions:
 ```text
 tests/test_dictate_runtime_guards.py   -> restart, race, processing guard regressions
 tests/test_dictate.py                  -> broad behavior + source-level guard checks
+tests/test_win_hotkey.py               -> RegisterHotKey parse + listener thread (fake Win32 API)
+tests/test_hotkey_registration.py      -> native-first registration, fallback, rehook gating
+tests/test_keyboard_hook_watchdog.py   -> polling rescue, reactive/proactive re-register
+tests/test_stream_failure_alerts.py    -> persistent-failure alert latch + recovery callbacks
+tests/test_watchdog_recovery.py        -> device re-resolve after repeated recovery failures
+tests/test_wake_word_listener.py       -> wake word detect, silence timeout, frame routing
+tests/test_wake_word_components.py     -> shared buffer, mode toggle, file writer
 tests/test_diagnostics.py              -> log parsing/aggregation/reporting
 tests/test_startup_healthcheck.py      -> preflight phrase flow
 tests/test_calibrate.py                -> calibration and threshold logic checks
@@ -325,6 +407,12 @@ tests/test_app_state.py                -> app state defaults
 ## 11) Fast Navigation for Agents
 
 ```text
+Need to debug "hotkey doesn't fire" or "recording stops instantly":
+  -> voice_dictation/win_hotkey.py (WinHotkeyListener, release poll)
+  -> dictate.py::_register_hotkey() (native vs fallback path selection)
+  -> "registered via Win32 RegisterHotKey" + watchdog lines in dictation.log
+  -> instant stop = release poll saw a combo key up (tap instead of hold?)
+
 Need to debug "red but no transcription":
   -> dictate.py::_prepare_audio_for_transcription()
   -> check noise-gate logs in dictation.log

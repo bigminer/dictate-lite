@@ -9,8 +9,10 @@ Uses OpenAI Whisper (via faster-whisper) with GPU acceleration for fast, accurat
 ## Features
 
 - **Push-to-talk** - Hold hotkey to record, release to transcribe
+- **Native hotkey detection** - Uses Win32 `RegisterHotKey` (not a keyboard hook), so detection survives lock/unlock and sleep, never suppresses other keystrokes, and cannot stall the keyboard
 - **Open Mic Mode** - Say a wake word to start recording; silence ends the segment automatically
-- **System tray icon** - Green (ready), blue (open mic listening), red (recording), yellow (processing)
+- **System tray icon** - Green (ready), blue (open mic listening), red (recording), yellow (processing), orange (degraded - a failure needs attention)
+- **Loud failure feedback** - Error tone + orange tray icon when hotkey detection or audio recovery fails, instead of failing silently
 - **Audio feedback** - Ascending/descending tones confirm recording start/stop in open mic mode
 - **Configurable hotkey** - Default Alt+F, fully customizable
 - **Multiple languages** - English, auto-detect, or 50+ language codes
@@ -123,9 +125,9 @@ The installer is idempotent - safe to run multiple times to reconfigure.
 
 4. **Check status:** Hover over tray icon for current settings
 
-4. **Run healthcheck while app is running:** Right-click tray icon → `Run Startup Healthcheck...`
+5. **Run healthcheck while app is running:** Right-click tray icon → `Run Startup Healthcheck...`
 
-5. **Exit:** Right-click tray icon → Exit
+6. **Exit:** Right-click tray icon → Exit
 
 ## Limitations
 
@@ -163,7 +165,9 @@ Run `uninstall.bat` to remove:
 
 ## Security Considerations
 
-The `keyboard` library used for hotkey detection installs a global keyboard hook via the Windows API. This hook receives all keystrokes system-wide, not just the configured hotkey. The application only processes press/release events for the configured hotkey and discards all other key events immediately. No keystrokes are logged, stored, or transmitted. Users should ensure the application is installed from a trusted source and review the `src/dictate.py` hotkey handler if concerned.
+Hotkey detection uses the Win32 `RegisterHotKey` API (since v1.10.0). The OS delivers a notification only when the registered combination is pressed - the application never sees any other keystrokes on this path.
+
+Two narrower uses of the `keyboard` library remain: text injection (`keyboard.write` sends synthetic keystrokes; it does not read input), and a fallback detection path used only when the hotkey cannot be registered natively (a bare modifier key like `right ctrl`, or a combination already owned by another application). The fallback installs a global keyboard hook that receives all keystrokes system-wide; it processes only the configured hotkey's press/release events and discards everything else immediately. No keystrokes are logged, stored, or transmitted on any path. Users should ensure the application is installed from a trusted source and review `src/voice_dictation/win_hotkey.py` and the `src/dictate.py` hotkey handlers if concerned.
 
 ## Troubleshooting
 
@@ -173,7 +177,9 @@ The `keyboard` library used for hotkey detection installs a global keyboard hook
 - Try restarting your computer
 
 ### "Access denied" or hotkey doesn't work
-- Right-click `start-dictation.bat` → "Run as administrator"
+- If the tray icon is orange and an error tone played at startup, another application owns your hotkey combination - the app fell back to hook-based detection. Pick a different `HOTKEY` in `src/config.py`
+- Text cannot be typed into elevated (admin) windows - this is a Windows security boundary, not a bug
+- Right-click `start-dictation.bat` → "Run as administrator" only if you need dictation inside admin windows
 
 ### Transcription is slow
 - You're probably in CPU mode
@@ -266,8 +272,9 @@ voice-dictation/
 | File | Purpose |
 |------|---------|
 | `src/dictate.py` | Main orchestration + compatibility facade (tray/hotkey/runtime wiring) |
+| `src/voice_dictation/win_hotkey.py` | Native Win32 RegisterHotKey detection (message-loop thread + release polling) |
 | `src/voice_dictation/recording_pipeline.py` | Extracted recording/transcription preparation pipeline helpers |
-| `src/voice_dictation/watchdog_loops.py` | Extracted recording and stream watchdog/recovery loops |
+| `src/voice_dictation/watchdog_loops.py` | Recording, stream-health, and keyboard-hook watchdog/recovery loops |
 | `src/voice_dictation/wake_word_listener.py` | Wake word detection loop with energy-based silence timeout |
 | `src/voice_dictation/shared_audio_buffer.py` | Thread-safe FIFO for audio frames between producer/consumer |
 | `src/voice_dictation/wake_word_mode.py` | Wake word mode state management (enable/disable/toggle) |
@@ -296,6 +303,10 @@ voice-dictation/
 
 - `tests/test_dictate.py` - core tray/hotkey/transcription behavior
 - `tests/test_dictate_runtime_guards.py` - runtime race/restart/guard regression coverage
+- `tests/test_win_hotkey.py` - RegisterHotKey parsing and listener thread behavior
+- `tests/test_hotkey_registration.py` - native-first registration, fallback, rehook, modifier cleanup gating
+- `tests/test_keyboard_hook_watchdog.py` - dead-hook detection, polling rescue, proactive rehook
+- `tests/test_stream_failure_alerts.py` - persistent audio failure alerting and recovery latch
 - `tests/test_startup_healthcheck.py` - startup healthcheck behavioral flow
 - `tests/test_diagnostics.py` - diagnostics parsing/aggregation/report output
 - `tests/test_calibrate.py` - calibration and fallback behavior
