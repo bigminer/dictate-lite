@@ -22,7 +22,7 @@ import runtime_state
 import transcription_io
 from app_state import DictationAppState
 from audio_stream_manager import AudioStreamManager
-from voice_dictation import recording_pipeline, watchdog_loops
+from voice_dictation import recording_pipeline, watchdog_loops, win_hotkey
 from voice_dictation.shared_audio_buffer import SharedAudioBuffer
 from voice_dictation.wake_word_mode import WakeWordMode
 
@@ -511,6 +511,13 @@ def cleanup_resources(shutdown_status='shutdown_clean', shutdown_reason='cleanup
         logger.info("Audio stream closed")
     except Exception as e:
         logger.warning(f"Error closing audio stream: {e}")
+
+    # Stop native hotkey listener
+    try:
+        _stop_win_hotkey_listener()
+        logger.info("Native hotkey listener stopped")
+    except Exception as e:
+        logger.warning(f"Error stopping native hotkey listener: {e}")
 
     # Unhook keyboard hotkeys
     try:
@@ -1207,10 +1214,14 @@ def stop_recording_and_transcribe():
     # events, so the OS still believes the modifiers are held. Clear them
     # immediately — the previous cleanup ran only on the injection path, so
     # no-text outcomes (audio too quiet, no speech) left Ctrl stuck down.
-    try:
-        _release_all_modifiers_sendinput()
-    except Exception:
-        logger.warning('Modifier cleanup after hotkey release failed', exc_info=True)
+    # Only the keyboard-library fallback path suppresses; the native
+    # RegisterHotKey path leaves OS key state intact, and clearing modifiers
+    # there would desync a Ctrl the user is still physically holding.
+    if _win_hotkey_listener is None:
+        try:
+            _release_all_modifiers_sendinput()
+        except Exception:
+            logger.warning('Modifier cleanup after hotkey release failed', exc_info=True)
 
     try:
         _set_processing_icon()
@@ -1252,15 +1263,63 @@ def _on_hotkey_event(event):
         on_hotkey_release()
 
 
-def _register_hotkey():
-    """Register keyboard handlers for the configured hotkey.
+# Active native RegisterHotKey listener, or None when detection is running
+# on the keyboard-library fallback path.
+_win_hotkey_listener = None
 
-    Bare single keys (e.g. 'right ctrl') must use hook_key: the keyboard
-    library's add_hotkey never fires callbacks for a lone modifier — every
-    press gets rescued by the polling watchdog instead (0.22s late, alarms
-    on each press). hook_key delivers raw down/up events for any key.
-    Multi-key combos keep the add_hotkey press/release pair.
+
+def _stop_win_hotkey_listener():
+    """Stop and clear the native hotkey listener if one is running."""
+    global _win_hotkey_listener
+    listener = _win_hotkey_listener
+    _win_hotkey_listener = None
+    if listener is not None:
+        listener.stop()
+
+
+def _register_hotkey():
+    """Register detection for the configured hotkey.
+
+    Primary path: native Win32 RegisterHotKey (thread-scoped registration,
+    not a hook — survives lock/unlock, suppresses nothing, cannot stall the
+    keyboard). Falls back to keyboard-library hooks when the combo cannot
+    be expressed as a registration (bare modifier) or another application
+    already owns it (RegisterHotKey returns FALSE — alert loudly, since
+    detection is then back on the hook path with all its failure modes).
+
+    Fallback path: bare single keys (e.g. 'right ctrl') must use hook_key —
+    the keyboard library's add_hotkey never fires callbacks for a lone
+    modifier. Multi-key combos keep the add_hotkey press/release pair.
     """
+    global _win_hotkey_listener
+    parsed = win_hotkey.parse_hotkey(HOTKEY_PARTS) if sys.platform == 'win32' else None
+    if parsed is not None:
+        mod_flags, vk, release_vk_groups = parsed
+        listener = win_hotkey.WinHotkeyListener(
+            mod_flags,
+            vk,
+            release_vk_groups,
+            on_press=on_hotkey_press,
+            on_release=on_hotkey_release,
+            logger=logger,
+        )
+        if listener.start():
+            _win_hotkey_listener = listener
+            logger.info(
+                f"Hotkey '{HOTKEY}' registered via Win32 RegisterHotKey "
+                f'(mods=0x{mod_flags:04X}, vk=0x{vk:02X})'
+            )
+            return
+        _on_hook_suspect(
+            f"RegisterHotKey rejected '{HOTKEY}' (combo owned by another app?) — "
+            'falling back to keyboard-library hooks'
+        )
+    elif sys.platform == 'win32':
+        logger.info(
+            f"Hotkey '{HOTKEY}' cannot be expressed via RegisterHotKey — "
+            'using keyboard-library hooks'
+        )
+
     if len(HOTKEY_PARTS) == 1:
         keyboard.hook_key(HOTKEY, _on_hotkey_event, suppress=True)
     else:
@@ -1271,13 +1330,21 @@ def _register_hotkey():
 def _is_hotkey_currently_pressed():
     """Best-effort hotkey state check for release-callback fallback logic.
 
-    Primary: keyboard.is_pressed (works when the library hook is alive,
-    which is required because suppress=True hides keys from GetAsyncKeyState).
-    Fallback: GetAsyncKeyState (works when the hook is dead and keys aren't
-    suppressed).
+    Native RegisterHotKey path: GetAsyncKeyState is authoritative (nothing
+    is suppressed) and uses side-agnostic modifier VKs matching how the
+    combo actually triggers.
+    Keyboard-library path: keyboard.is_pressed first (suppress=True hides
+    keys from GetAsyncKeyState while the hook is alive), then
+    GetAsyncKeyState for when the hook is dead.
     """
     if not HOTKEY_PARTS:
         return True
+    listener = _win_hotkey_listener
+    if listener is not None:
+        try:
+            return listener.is_combo_held()
+        except Exception:
+            pass
     try:
         return all(keyboard.is_pressed(key) for key in HOTKEY_PARTS)
     except Exception:
@@ -1367,11 +1434,17 @@ def build_tray_menu():
 
 
 def _rehook_hotkeys():
-    """Unhook all keyboard hooks and re-register the hotkey pair.
+    """Tear down and re-register hotkey detection (native or keyboard-lib).
 
-    Called by the keyboard hook watchdog when the Windows low-level hook
-    (WH_KEYBOARD_LL) silently dies, or proactively as scheduled insurance.
+    Called by the keyboard hook watchdog when detection looks dead, or
+    proactively as scheduled insurance. Skipped while recording/processing:
+    stopping the native listener mid-hold would cut a dictation short, and
+    the next proactive cycle re-registers anyway.
     """
+    if _is_audio_pipeline_busy():
+        logger.info('Hotkey re-registration skipped: recording/processing in progress')
+        return
+    _stop_win_hotkey_listener()
     keyboard.unhook_all()
     _register_hotkey()
     logger.info(f"Hotkeys re-registered: {HOTKEY}")
