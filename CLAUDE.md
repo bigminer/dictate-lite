@@ -38,8 +38,8 @@ Logs are written to `%USERPROFILE%\voice-dictation\dictation.log` (level from `L
 2. Model loads lazily in background → tray turns green
 3. `_register_hotkey()` prefers native Win32 `RegisterHotKey` (`voice_dictation/win_hotkey.py`): a dedicated thread registers the combo and runs a `GetMessageW` loop; `WM_HOTKEY` fires press, then a 10ms `GetAsyncKeyState` poll on that thread detects release
 4. Keyboard-library hooks (`suppress=True`) remain only as fallback: bare-modifier hotkeys (`hook_key`) or a combo another app already owns (`add_hotkey` pair + error tone + orange degraded tray)
-5. Press: `start_recording()` → tray red, audio callback fills `recorded_frames[]`
-6. Release: `stop_recording_and_transcribe()` → tray yellow → transcribe → `keyboard.write()` → tray green
+5. Press: `start_recording()` → tray red + ascending tone, audio callback fills `recorded_frames[]`
+6. Release: `stop_recording_and_transcribe()` → descending tone → tray yellow → transcribe → burst-paced `keyboard.write()` → tray green
 7. Watchdogs back all of it up: recording-state (release fallback, timeout), keyboard-hook (polling rescue + re-registration), stream-health (reopen with backoff, loud alert after repeated failures)
 
 **Open Mic / Wake Word mode (optional, toggle from tray):**
@@ -91,6 +91,8 @@ AUDIO_DEVICE = None       # None = system default, or device index
 NOISE_REDUCTION = False   # Filter background noise (requires noisereduce)
 USE_CLIPBOARD = False     # Backup text to clipboard (opt-in)
 VOCABULARY = ''           # Custom words: 'Claude, TypeScript, JIRA'
+INJECT_CHUNK_CHARS = 32   # Chars per full-speed injection burst (0 = flat 10ms/char)
+INJECT_CHUNK_PAUSE_S = 0.1  # Pause between injection bursts
 WAKE_WORD_ENABLED = False # Open mic mode on at launch
 WAKE_WORD_MODEL = 'hey_jarvis_v0.1'  # Pre-trained or custom .onnx
 WAKE_WORD_THRESHOLD = 0.5           # Detection confidence 0.0-1.0
@@ -101,4 +103,4 @@ WAKE_WORD_OUTPUT_FILE = None         # Optional transcription log path
 ## Model Cache
 
 Whisper models download to `%USERPROFILE%\.cache\huggingface\hub` on first run.
-Sizes: tiny ~75MB, base ~150MB, small ~500MB, medium ~1.5GB, large ~3GB
+Sizes: tiny ~75MB, base ~150MB, small ~500MB, medium ~1.5GB, large-v3-turbo ~1.6GB, large ~3GB

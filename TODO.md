@@ -2,9 +2,10 @@
 
 ## Features
 
-- [ ] **Open mic / wake word mode** — Hands-free dictation activated by a wake
-  word (e.g., "dictate"). Runs as an optional mode alongside the default
-  push-to-talk hotkey.
+- [x] **Open mic / wake word mode** — SHIPPED. Hands-free dictation activated by
+  a wake word. Runs as an optional mode alongside the default push-to-talk
+  hotkey (tray toggle, blue icon, silence-timeout segmentation). Notes below
+  kept for historical context.
 
   ### Architecture
   ```

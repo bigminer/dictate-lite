@@ -13,10 +13,10 @@ Uses OpenAI Whisper (via faster-whisper) with GPU acceleration for fast, accurat
 - **Open Mic Mode** - Say a wake word to start recording; silence ends the segment automatically
 - **System tray icon** - Green (ready), blue (open mic listening), red (recording), yellow (processing), orange (degraded - a failure needs attention)
 - **Loud failure feedback** - Error tone + orange tray icon when hotkey detection or audio recovery fails, instead of failing silently
-- **Audio feedback** - Ascending/descending tones confirm recording start/stop in open mic mode
+- **Audio feedback** - Ascending/descending tones confirm recording start/stop in both hotkey and open mic modes
 - **Configurable hotkey** - Default Alt+F, fully customizable
 - **Multiple languages** - English, auto-detect, or 50+ language codes
-- **Model selection** - Trade speed vs accuracy (tiny → large)
+- **Model selection** - Trade speed vs accuracy (tiny → large, plus large-v3-turbo for near-large accuracy at higher speed)
 - **GPU acceleration** - CUDA support for fast transcription
 - **Offline capable** - After initial model download
 
@@ -25,7 +25,7 @@ Uses OpenAI Whisper (via faster-whisper) with GPU acceleration for fast, accurat
 ### 0. Internet Connection (First Run Only)
 
 The first time you run the tool, it downloads the Whisper speech model.
-Model sizes: tiny ~75MB, base ~150MB, small ~500MB, medium ~1.5GB, large ~3GB.
+Model sizes: tiny ~75MB, base ~150MB, small ~500MB, medium ~1.5GB, large-v3-turbo ~1.6GB, large ~3GB.
 After download, the model is cached and works offline.
 
 ### 1. Python 3.11+ (Required)
@@ -101,9 +101,9 @@ The installer is idempotent - safe to run multiple times to reconfigure.
 
 2. **Dictate:**
    - Hold your hotkey (default: Alt+F)
-   - Icon turns red - speak clearly
+   - Icon turns red and an ascending tone plays - speak clearly
    - Release the hotkey
-   - Icon turns yellow while processing
+   - A descending tone plays; icon turns yellow while processing
    - Text appears in your active window
    - Icon returns to green
 
@@ -147,7 +147,7 @@ This applies audio filtering before transcription, which can help with stationar
 
 ### Text Injection Behavior
 
-Transcribed text is injected into the active window using simulated keystrokes with a 10ms delay between characters. This deliberate throttling prevents crashes in certain terminal applications (notably Claude Code's TUI).
+Transcribed text is injected into the active window using simulated keystrokes, paced in bursts: 32 characters at full speed, then a 100ms pause (configurable via `INJECT_CHUNK_CHARS` / `INJECT_CHUNK_PAUSE_S`). The pauses give terminal applications (notably Claude Code's TUI) time to drain their input queue without the latency of a flat per-character delay. Set `INJECT_CHUNK_CHARS = 0` to restore the legacy 10ms-per-character throttle.
 
 If you want clipboard backup, enable it in `src/config.py`:
 
@@ -215,7 +215,8 @@ If an optional key is missing, runtime defaults are applied automatically.
 
 ```python
 HOTKEY = 'alt+f'          # Your recording hotkey
-MODEL_SIZE = 'small'      # tiny, base, small, medium, large
+MODEL_SIZE = 'small'      # tiny, base, small, medium, large, large-v3-turbo
+BEAM_SIZE = 5             # Whisper decode beam: 1 = greedy (fastest), 5 = default
 LANGUAGE = 'en'           # 'en', 'auto', 'es', 'fr', 'de', 'ja', etc.
 DEVICE = 'cuda'           # 'cuda' or 'cpu'
 COMPUTE_TYPE = 'float16'  # 'float16' for GPU, 'int8' for CPU
@@ -229,6 +230,8 @@ NOISE_GATE_PEAK_MULTIPLIER = 3.0  # Allow low-RMS clips if peaks indicate speech
 USE_CLIPBOARD = False     # Copy text to clipboard as backup (opt-in)
 LOG_TRANSCRIPT_TEXT = False  # Log transcript snippets (debug only)
 MAX_TYPED_CHARS = 1000    # Maximum characters typed per utterance
+INJECT_CHUNK_CHARS = 32   # Chars typed per full-speed burst (0 = legacy 10ms/char)
+INJECT_CHUNK_PAUSE_S = 0.1  # Pause between bursts
 LOG_LEVEL = 'INFO'        # Runtime log verbosity (DEBUG/INFO/WARNING/ERROR)
 VOCABULARY = ''           # Custom words: 'Claude, Anthropic, TypeScript'
 
@@ -303,6 +306,7 @@ voice-dictation/
 
 - `tests/test_dictate.py` - core tray/hotkey/transcription behavior
 - `tests/test_dictate_runtime_guards.py` - runtime race/restart/guard regression coverage
+- `tests/test_recording_pipeline.py` - transcription pipeline timing/beam-size behavior
 - `tests/test_win_hotkey.py` - RegisterHotKey parsing and listener thread behavior
 - `tests/test_hotkey_registration.py` - native-first registration, fallback, rehook, modifier cleanup gating
 - `tests/test_keyboard_hook_watchdog.py` - dead-hook detection, polling rescue, proactive rehook

@@ -36,6 +36,7 @@ voice-dictation/
 |-- tests/
 |   |-- test_dictate.py
 |   |-- test_dictate_runtime_guards.py
+|   |-- test_recording_pipeline.py
 |   |-- test_win_hotkey.py
 |   |-- test_hotkey_registration.py
 |   |-- test_keyboard_hook_watchdog.py
@@ -221,7 +222,7 @@ Hotkey press (WM_HOTKEY on win-hotkey thread, or fallback hook callback,
               or keyboard-hook watchdog polling rescue)
   -> start_recording()
      -> set STATE.is_recording = True
-     -> tray red
+     -> tray red + ascending tone
 
 audio_callback()
   -> append frames while recording
@@ -232,6 +233,7 @@ Hotkey release (win-hotkey release poll: any combo key up via
                 GetAsyncKeyState; or fallback hook release callback;
                 or recording watchdog release fallback)
   -> stop_recording_and_transcribe()
+      -> descending tone
       -> set processing state + tray yellow
       -> voice_dictation.recording_pipeline.prepare_audio_for_transcription()
          - concatenate frames
@@ -239,11 +241,13 @@ Hotkey release (win-hotkey release poll: any combo key up via
          - noise gate: RMS + peak-aware check
          - optional noise reduction
       -> voice_dictation.recording_pipeline.transcribe_audio()
-         - faster-whisper transcribe
+         - faster-whisper transcribe (beam width from BEAM_SIZE config)
          - sanitize text
+         - log duration + realtime factor
       -> _transcribe_and_emit_text()
          - optional clipboard copy
-         - keyboard.write()
+         - keyboard.write() in bursts (INJECT_CHUNK_CHARS per burst,
+           INJECT_CHUNK_PAUSE_S between; 0 = legacy flat 10ms/char)
       -> finish -> tray green
 ```
 
@@ -383,8 +387,9 @@ External user-visible actions:
 ## 10) Test Coverage Map (Architecture-Relevant)
 
 ```text
-tests/test_dictate_runtime_guards.py   -> restart, race, processing guard regressions
+tests/test_dictate_runtime_guards.py   -> restart, race, processing guard, tone, injection pacing regressions
 tests/test_dictate.py                  -> broad behavior + source-level guard checks
+tests/test_recording_pipeline.py       -> transcription timing log + beam-size passthrough
 tests/test_win_hotkey.py               -> RegisterHotKey parse + listener thread (fake Win32 API)
 tests/test_hotkey_registration.py      -> native-first registration, fallback, rehook gating
 tests/test_keyboard_hook_watchdog.py   -> polling rescue, reactive/proactive re-register
