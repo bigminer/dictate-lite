@@ -121,6 +121,48 @@ def test_stop_recording_processes_once_and_clears_processing():
     assert module.STATE.is_recording is False
 
 
+def test_start_recording_plays_ascending_start_tone():
+    module, _ = _import_dictate_module()
+    with module.STATE.lock:
+        module.STATE.is_recording = False
+        module.STATE.is_processing = False
+
+    with patch.object(module, '_play_tone') as tone_mock:
+        started = module.start_recording()
+
+    assert started is True
+    tone_mock.assert_called_once_with(800, 1000)
+
+
+def test_start_recording_guard_paths_play_no_tone():
+    module, _ = _import_dictate_module()
+    with patch.object(module, '_play_tone') as tone_mock:
+        with module.STATE.lock:
+            module.STATE.is_recording = True
+            module.STATE.is_processing = False
+        assert module.start_recording() is False
+
+        with module.STATE.lock:
+            module.STATE.is_recording = False
+            module.STATE.is_processing = True
+        assert module.start_recording() is False
+
+    tone_mock.assert_not_called()
+
+
+def test_stop_recording_plays_descending_stop_tone_once():
+    module, _ = _import_dictate_module()
+    _prime_recording_state(module)
+    module.STATE.model = MagicMock()
+
+    with patch.object(module, '_play_tone') as tone_mock, \
+         patch.object(module.transcription_io, 'transcribe_audio_array', return_value='hello world'):
+        module.stop_recording_and_transcribe()
+        module.stop_recording_and_transcribe()
+
+    tone_mock.assert_called_once_with(1000, 800)
+
+
 def test_stop_recording_truncates_output_to_max_typed_chars():
     module, mocked = _import_dictate_module({'MAX_TYPED_CHARS': 5})
     _prime_recording_state(module)

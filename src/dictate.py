@@ -994,6 +994,7 @@ def start_recording():
         STATE.recording_start_time = time.time()
         STATE.is_recording = True
     _set_recording_icon()
+    _play_tone(800, 1000)  # ascending pip: recording started
     logger.info("Recording started")
     return True
 
@@ -1209,6 +1210,8 @@ def stop_recording_and_transcribe():
     recorded_frames = _begin_processing_from_recording()
     if recorded_frames is None:
         return
+
+    _play_tone(1000, 800)  # descending pip: recording ended
 
     # Shut the door the hotkey opened: suppress=True eats the hotkey's key-up
     # events, so the OS still believes the modifiers are held. Clear them

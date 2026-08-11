@@ -2,10 +2,22 @@
 
 import os
 import sys
+from unittest.mock import MagicMock
+
 import pytest
 
 # Add src directory to path so we can import modules under test
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+
+@pytest.fixture(autouse=True)
+def silence_winsound(monkeypatch):
+    """Stub winsound so tone-playing code paths never beep during test runs.
+
+    _play_tone imports winsound lazily inside its worker thread, so the stub
+    must live in sys.modules at call time, not just at module import time.
+    """
+    monkeypatch.setitem(sys.modules, 'winsound', MagicMock())
 
 
 @pytest.fixture
