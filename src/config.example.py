@@ -60,6 +60,14 @@ LOG_TRANSCRIPT_TEXT = False
 # Prevents accidental multi-thousand-character injections if transcription goes wrong.
 MAX_TYPED_CHARS = 1000
 
+# Text injection pacing: type INJECT_CHUNK_CHARS at full speed, pause
+# INJECT_CHUNK_PAUSE_S between bursts. Pausing lets TUI apps (e.g. Claude
+# Code) drain their input queue while long texts land far faster than the
+# legacy flat 10ms/char throttle.
+# Set INJECT_CHUNK_CHARS = 0 to restore the legacy per-char throttle.
+INJECT_CHUNK_CHARS = 32
+INJECT_CHUNK_PAUSE_S = 0.1
+
 # Log level for runtime diagnostics: DEBUG, INFO, WARNING, ERROR
 # INFO is recommended for normal usage and better performance.
 LOG_LEVEL = 'INFO'

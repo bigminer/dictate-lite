@@ -810,6 +810,8 @@ LOG_TRANSCRIPT_TEXT = _config_value('LOG_TRANSCRIPT_TEXT', False)
 LOG_LEVEL = _config_value('LOG_LEVEL', None)
 MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
 BEAM_SIZE = _config_value('BEAM_SIZE', 5)
+INJECT_CHUNK_CHARS = _config_value('INJECT_CHUNK_CHARS', 32)
+INJECT_CHUNK_PAUSE_S = _coerce_float_config(_config_value('INJECT_CHUNK_PAUSE_S', 0.1), 0.1)
 NOISE_GATE_THRESHOLD = _coerce_float_config(_config_value('NOISE_GATE_THRESHOLD', 0.01), 0.01)
 NOISE_GATE_PEAK_MULTIPLIER = _coerce_float_config(_config_value('NOISE_GATE_PEAK_MULTIPLIER', 3.0), 3.0)
 
@@ -868,6 +870,16 @@ if not isinstance(BEAM_SIZE, int):
         BEAM_SIZE = 5
 if BEAM_SIZE < 1:
     BEAM_SIZE = 1
+
+if not isinstance(INJECT_CHUNK_CHARS, int):
+    try:
+        INJECT_CHUNK_CHARS = int(str(INJECT_CHUNK_CHARS).strip())
+    except (TypeError, ValueError):
+        INJECT_CHUNK_CHARS = 32
+if INJECT_CHUNK_CHARS < 0:
+    INJECT_CHUNK_CHARS = 0
+if INJECT_CHUNK_PAUSE_S < 0:
+    INJECT_CHUNK_PAUSE_S = 0.0
 
 if NOISE_GATE_PEAK_MULTIPLIER < 1.0:
     NOISE_GATE_PEAK_MULTIPLIER = 1.0
@@ -1145,10 +1157,25 @@ def _inject_text(text):
 
         injected = False
 
-        # Method 1: keyboard.write (10ms/char delay — works in terminals)
+        # Method 1: keyboard.write (works in terminals)
         if not injected:
             try:
-                keyboard.write(text, delay=0.01, restore_state_after=False)
+                if INJECT_CHUNK_CHARS > 0:
+                    # Burst-and-pause pacing: full-speed bursts with pauses
+                    # between them, so TUI apps (the flat 10ms/char throttle
+                    # existed for Claude Code's TUI) can drain input while
+                    # long texts land in a fraction of the time.
+                    for start in range(0, len(text), INJECT_CHUNK_CHARS):
+                        if start:
+                            time.sleep(INJECT_CHUNK_PAUSE_S)
+                        keyboard.write(
+                            text[start:start + INJECT_CHUNK_CHARS],
+                            delay=0,
+                            restore_state_after=False,
+                        )
+                else:
+                    # Legacy flat per-char throttle (INJECT_CHUNK_CHARS = 0)
+                    keyboard.write(text, delay=0.01, restore_state_after=False)
                 injected = True
                 logger.info(f"Text injected via keyboard.write ({len(text)} chars)")
             except Exception:

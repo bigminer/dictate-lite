@@ -55,7 +55,7 @@ Logs are written to `%USERPROFILE%\voice-dictation\dictation.log` (level from `L
 - Hotkey detection is `RegisterHotKey` (registration), not a keyboard hook: survives lock/unlock, suppresses nothing (so `GetAsyncKeyState` watchdogs always see true key state), and cannot stall the keyboard. Modifiers are side-agnostic (left ctrl triggers a right-ctrl combo)
 - Failures are loud, never silent: error tone + orange DEGRADED tray latch on hook death or persistent audio-recovery failure
 - Audio uses callback-based streaming (16kHz mono float32) rather than blocking reads
-- Text injection throttled to 10ms/char to prevent Claude Code TUI crash
+- Text injection paced in bursts (32 chars full-speed + 100ms pause by default) to prevent Claude Code TUI crash; `INJECT_CHUNK_CHARS = 0` restores the legacy flat 10ms/char throttle
 - Single-instance enforced via PID file at `%TEMP%\voice-dictation.lock`
 - Wake word detection is lightweight CPU-only (OpenWakeWord ONNX); Whisper only invoked on activation
 - Two `pythonw.exe` processes per launch is normal: the venv launcher shim parents the real interpreter — never kill the shim (its job object kills the app)

@@ -174,6 +174,33 @@ def test_stop_recording_truncates_output_to_max_typed_chars():
     assert typed_text == 'abcde'
 
 
+def test_inject_text_writes_in_bursts_with_pauses():
+    module, mocked = _import_dictate_module({'INJECT_CHUNK_CHARS': 4, 'INJECT_CHUNK_PAUSE_S': 0.0})
+
+    module._inject_text('abcdefghij')
+
+    calls = mocked['keyboard'].write.call_args_list
+    assert [c.args[0] for c in calls] == ['abcd', 'efgh', 'ij']
+    assert all(c.kwargs['delay'] == 0 for c in calls)
+
+
+def test_inject_text_chunk_chars_zero_restores_legacy_per_char_throttle():
+    module, mocked = _import_dictate_module({'INJECT_CHUNK_CHARS': 0})
+
+    module._inject_text('abcdefghij')
+
+    calls = mocked['keyboard'].write.call_args_list
+    assert len(calls) == 1
+    assert calls[0].args[0] == 'abcdefghij'
+    assert calls[0].kwargs['delay'] == 0.01
+
+
+def test_inject_text_chunk_defaults():
+    module, _ = _import_dictate_module()
+    assert module.INJECT_CHUNK_CHARS == 32
+    assert abs(module.INJECT_CHUNK_PAUSE_S - 0.1) < 1e-9
+
+
 def test_watchdog_release_fallback_triggers_stop_once():
     module, _ = _import_dictate_module()
     with module.STATE.lock:
