@@ -6,10 +6,16 @@
 # AVOID common combinations like: ctrl+c, ctrl+v, ctrl+s, alt+tab, alt+f4
 HOTKEY = 'alt+f'
 
-# Whisper model size: tiny, base, small, medium, large
+# Whisper model size: tiny, base, small, medium, large, large-v3-turbo
 # Larger = more accurate but slower and uses more VRAM
 # tiny (~1s), base (~2s), small (~3s), medium (~5s), large (~10s)
+# large-v3-turbo: near-large accuracy with a pruned decoder - faster than
+# medium at similar VRAM (~1.6GB); best quality-per-ms option on GPU
 MODEL_SIZE = 'small'
+
+# Beam size for Whisper decoding: 1 = greedy (fastest), 5 = beam search (default)
+# 1 is usually indistinguishable for clean single-speaker dictation
+BEAM_SIZE = 5
 
 # Language for transcription
 # 'en' = English, 'auto' = auto-detect, or specific code: 'es', 'fr', 'de', 'ja', etc.

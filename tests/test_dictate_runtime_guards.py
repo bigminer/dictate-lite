@@ -345,9 +345,22 @@ def test_config_numeric_strings_are_coerced_for_startup_safety():
     module, _ = _import_dictate_module({
         'NOISE_GATE_THRESHOLD': '0.0057',
         'MAX_TYPED_CHARS': '42',
+        'BEAM_SIZE': '3',
     })
     assert abs(module.NOISE_GATE_THRESHOLD - 0.0057) < 1e-9
     assert module.MAX_TYPED_CHARS == 42
+    assert module.BEAM_SIZE == 3
+
+
+def test_beam_size_config_reaches_transcription_call():
+    module, _ = _import_dictate_module({'BEAM_SIZE': 1})
+    _prime_recording_state(module)
+    module.STATE.model = MagicMock()
+
+    with patch.object(module.transcription_io, 'transcribe_audio_array', return_value='hi') as transcribe_mock:
+        module.stop_recording_and_transcribe()
+
+    assert transcribe_mock.call_args.kwargs['beam_size'] == 1
 
 
 def test_check_single_instance_retries_mutex_for_restart_handoff():

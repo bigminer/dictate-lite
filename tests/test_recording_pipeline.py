@@ -31,6 +31,16 @@ def _run_transcribe(audio_seconds=2.0, text='hello there', **overrides):
     return result, io_module, logger
 
 
+def test_transcribe_audio_passes_beam_size_through():
+    _, io_module, _ = _run_transcribe(beam_size=1)
+    assert io_module.transcribe_audio_array.call_args.kwargs['beam_size'] == 1
+
+
+def test_transcribe_audio_defaults_to_beam_size_5():
+    _, io_module, _ = _run_transcribe()
+    assert io_module.transcribe_audio_array.call_args.kwargs['beam_size'] == 5
+
+
 def test_transcribe_audio_logs_duration_and_realtime_factor():
     _, _, logger = _run_transcribe(audio_seconds=2.0, text='hello there')
 

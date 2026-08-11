@@ -809,6 +809,7 @@ USE_CLIPBOARD = _config_value('USE_CLIPBOARD', False)
 LOG_TRANSCRIPT_TEXT = _config_value('LOG_TRANSCRIPT_TEXT', False)
 LOG_LEVEL = _config_value('LOG_LEVEL', None)
 MAX_TYPED_CHARS = _config_value('MAX_TYPED_CHARS', 1000)
+BEAM_SIZE = _config_value('BEAM_SIZE', 5)
 NOISE_GATE_THRESHOLD = _coerce_float_config(_config_value('NOISE_GATE_THRESHOLD', 0.01), 0.01)
 NOISE_GATE_PEAK_MULTIPLIER = _coerce_float_config(_config_value('NOISE_GATE_PEAK_MULTIPLIER', 3.0), 3.0)
 
@@ -859,6 +860,14 @@ if not isinstance(MAX_TYPED_CHARS, int):
         MAX_TYPED_CHARS = 1000
 if MAX_TYPED_CHARS < 1:
     MAX_TYPED_CHARS = 1
+
+if not isinstance(BEAM_SIZE, int):
+    try:
+        BEAM_SIZE = int(str(BEAM_SIZE).strip())
+    except (TypeError, ValueError):
+        BEAM_SIZE = 5
+if BEAM_SIZE < 1:
+    BEAM_SIZE = 1
 
 if NOISE_GATE_PEAK_MULTIPLIER < 1.0:
     NOISE_GATE_PEAK_MULTIPLIER = 1.0
@@ -1179,6 +1188,7 @@ def _transcribe_and_emit_text(audio_data):
         vocabulary=VOCABULARY,
         max_typed_chars=MAX_TYPED_CHARS,
         logger=logger,
+        beam_size=BEAM_SIZE,
     )
     raw_text = result['raw_text']
     text = result['text']
@@ -1648,6 +1658,7 @@ def _wake_word_transcribe_worker():
             vocabulary=VOCABULARY,
             max_typed_chars=MAX_TYPED_CHARS,
             logger=logger,
+            beam_size=BEAM_SIZE,
         )
         text = result['text']
         if not text:

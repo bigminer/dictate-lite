@@ -80,10 +80,11 @@ def transcribe_audio(
     vocabulary,
     max_typed_chars,
     logger,
+    beam_size=5,
 ):
     """Transcribe audio and return normalized text payload with timing metadata."""
     transcribe_opts = {
-        'beam_size': 5,
+        'beam_size': beam_size,
         'language': transcribe_language,
     }
     if vocabulary:
