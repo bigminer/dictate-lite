@@ -104,11 +104,11 @@ def transcribe_audio(
         text = text[:max_typed_chars].rstrip()
 
     audio_duration_s = len(audio_data) / sample_rate
-    logger.info('Transcription complete', extra={
-        'transcription_ms': round(transcription_ms, 1),
-        'audio_s': round(audio_duration_s, 2),
-        'text_len': len(text) if text else 0,
-    })
+    realtime_factor = (transcription_ms / 1000.0) / audio_duration_s
+    logger.info(
+        f'Transcription complete: {transcription_ms:.0f}ms for {audio_duration_s:.1f}s audio '
+        f'(rtf={realtime_factor:.2f}), {len(text)} chars'
+    )
 
     return {
         'raw_text': raw_text,
